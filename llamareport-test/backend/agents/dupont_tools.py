@@ -43,7 +43,7 @@ async def generate_dupont_analysis(
         杜邦分析结果字典
     """
     try:
-        from utils.financial_calculator import DupontAnalyzer
+        from backend.utils.financial_calculator import DupontAnalyzer
         from models.dupont_models import DupontAnalysis
         
         logger.info(f"开始生成杜邦分析: {company_name} - {year}")

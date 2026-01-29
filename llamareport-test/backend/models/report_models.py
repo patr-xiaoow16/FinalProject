@@ -141,6 +141,16 @@ class BusinessGuidance(BaseModel):
     # 风险提示
     risk_warnings: Optional[List[str]] = Field(default=None, description="风险提示及其他相关说明")
 
+    # 可视化生成指令（不直接面向用户展示）
+    visualization_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="业绩指引洞察对应的可视化生成指令"
+    )
+    visualization_insights: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="业绩指引可视化洞察（由大模型生成）"
+    )
+
 
 # ==================== 业务亮点模型 ====================
 

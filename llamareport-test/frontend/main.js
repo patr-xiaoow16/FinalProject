@@ -423,7 +423,7 @@ const App = {
     const formatFinancialReviewSummary = (summary = '') => {
       const text = String(summary).replace(/\n+/g, ' ').trim()
       if (!text) return ''
-      const labelRegex = /(资产负债表(?:数据)?|利润表(?:数据)?|现金流量表(?:数据)?|综合判断|总体判断|总体评价|综合评价)[：:\s]*/g
+      const labelRegex = /(资产负债表(?:数据|分析)?|利润表(?:数据|分析)?|现金流量表(?:数据|分析)?|综合判断|总体判断|总体评价|综合评价|综合三表总结|综合三表分析|总体结论|综合结论)[：:\s]*/g
       const matches = Array.from(text.matchAll(labelRegex))
       if (matches.length === 0) {
         return formatSummaryList(summary)
@@ -462,12 +462,34 @@ const App = {
       return `<div class="summary-block">${items.join('')}</div>`
     }
 
-    const extractBusinessGuidancePayload = (result) => {
+    const stripHtmlTags = (text = '') => String(text).replace(/<[^>]*>/g, '')
+
+    const normalizeInsightText = (text = '') => stripHtmlTags(text)
+      .replace(/\s+/g, '')
+      .replace(/[：:、，,.;。；]/g, '')
+      .trim()
+
+    const appendFinancialReviewSupplement = (base = '', supplement = '') => {
+      const trimmed = String(supplement).trim()
+      if (!trimmed || trimmed.startsWith('{') || trimmed.startsWith('[')) return base
+      const baseText = normalizeInsightText(base)
+      const supplementText = normalizeInsightText(trimmed)
+      if (!supplementText) return base
+      if (baseText && (baseText.includes(supplementText) || supplementText.includes(baseText))) return base
+      const formatted = formatSummaryList(trimmed)
+      const title = '<div class="summary-title">补充说明</div>'
+      return `${base || ''}${base ? '<br>' : ''}${title}${formatted}`
+    }
+
+    const extractFinancialReviewPayload = (result) => {
       if (!result || typeof result !== 'object') return null
       const structured = result.structured_response || {}
-      if (structured.business_guidance) return structured.business_guidance
+      if (structured.summary && structured.visualization_tables) return structured
+      if (structured.financial_review) return structured.financial_review
+      if (structured.financialReview) return structured.financialReview
+
       const toolCall = Array.isArray(result.tool_calls)
-        ? result.tool_calls.find(tc => tc.tool_name === 'generate_business_guidance')
+        ? result.tool_calls.find(tc => tc.tool_name === 'generate_financial_review')
         : null
       if (!toolCall) return null
       let output = toolCall.tool_output || toolCall.output || null
@@ -479,7 +501,68 @@ const App = {
           return null
         }
       }
-      return output && typeof output === 'object' ? output : null
+      if (output && (output.summary || output.visualization_tables)) {
+        return output
+      }
+      return null
+    }
+
+    const formatFinancialReviewTableInsights = (tables) => {
+      if (!tables) return ''
+      const tableList = [
+        tables.balance_sheet_assets,
+        tables.balance_sheet_liabilities,
+        tables.income_statement_revenue,
+        tables.income_statement_expense,
+        tables.cash_flow
+      ].filter(Boolean)
+      const items = tableList
+        .filter(table => table?.insight)
+        .map(table => (
+          `<div class="summary-item"><span class="summary-label">${table.title || '表格洞察'}</span><div class="summary-text">${formatTableInsight(table.insight)}</div></div>`
+        ))
+      if (items.length === 0) return ''
+      return `<div class="summary-title">表格洞察</div><div class="summary-block">${items.join('')}</div>`
+    }
+
+    const extractBusinessGuidancePayload = (result) => {
+      if (!result || typeof result !== 'object') return null
+      const structured = result.structured_response || {}
+      if (structured.business_guidance) return structured.business_guidance
+      const toolCall = Array.isArray(result.tool_calls)
+        ? result.tool_calls.find(tc => tc.tool_name === 'generate_business_guidance')
+        : null
+      if (!toolCall) return null
+      let output = toolCall.tool_output || toolCall.output || null
+      let rawOutput = output && output.raw_output !== undefined ? output.raw_output : null
+      if (typeof rawOutput === 'string') {
+        try {
+          rawOutput = JSON.parse(rawOutput)
+        } catch (e) {
+          rawOutput = null
+        }
+      }
+      if (rawOutput && typeof rawOutput === 'object') {
+        const merged = { ...rawOutput }
+        if (output && typeof output === 'object') {
+          Object.keys(output).forEach(key => {
+            if (merged[key] === undefined) {
+              merged[key] = output[key]
+            }
+          })
+        }
+        return merged
+      }
+      if (output && typeof output === 'object') return output
+      if (typeof output === 'string') {
+        try {
+          const parsed = JSON.parse(output)
+          return parsed && typeof parsed === 'object' ? parsed : null
+        } catch (e) {
+          return null
+        }
+      }
+      return null
     }
 
     const formatBusinessGuidanceSummary = (payload = {}) => {
@@ -529,6 +612,261 @@ const App = {
         return ''
       }
       return `<div class="summary-block">${items.join('')}</div>`
+    }
+
+    const buildGuidanceToneCard = (payload = {}) => {
+      if (!payload || typeof payload !== 'object') return null
+      const spec = payload.visualization_spec || payload.visualizationSpec || {}
+      const operatingGoal = spec.operating_goal || spec.operatingGoal || {}
+      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
+      const stageMatch = String(expectedPerformance).match(/(进攻|防守|转型|稳健)/)
+      const stageText = stageMatch ? stageMatch[0] : (operatingGoal.stage || operatingGoal.focus || '—')
+      const priorityText = Array.isArray(operatingGoal.key_elements)
+        ? operatingGoal.key_elements.join(' > ')
+        : (operatingGoal.priority || operatingGoal.purpose || '—')
+      return {
+        title: '经营基调状态卡',
+        headline: `经营阶段：${stageText || '—'}`,
+        contribution: `目标优先级：${priorityText || '—'}`
+      }
+    }
+
+    const parseNumericValue = (value = '') => {
+      const text = String(value).replace(/,/g, '').trim()
+      const match = text.match(/-?\d+(\.\d+)?/)
+      if (!match) return null
+      return Number(match[0])
+    }
+
+    const buildGuidanceInsights = (description, findings = []) => {
+      const cleanFindings = Array.isArray(findings)
+        ? findings.map(item => String(item || '').trim()).filter(Boolean)
+        : []
+      const cleanDescription = String(description || '').trim()
+      if (!cleanDescription && cleanFindings.length === 0) return []
+      return [
+        {
+          insight_type: 'comparison',
+          description: cleanDescription || cleanFindings[0] || '要点概览',
+          key_findings: cleanFindings.length > 0
+            ? cleanFindings
+            : (cleanDescription ? [cleanDescription] : [])
+        }
+      ]
+    }
+
+    const getGuidanceInsights = (payload = {}, key) => {
+      const insightsRoot = payload.visualization_insights || payload.visualizationInsights || {}
+      const section = insightsRoot && typeof insightsRoot === 'object' ? insightsRoot[key] : null
+      if (!section) return null
+      if (Array.isArray(section)) return section
+      if (Array.isArray(section.insights)) return section.insights
+      return null
+    }
+
+    const filterGuidanceInsights = (insights = [], allowedItems = []) => {
+      if (!Array.isArray(insights)) return null
+      const allowed = new Set(allowedItems.map(item => String(item || '').trim()).filter(Boolean))
+      if (!allowed.size) return insights.length ? insights : null
+      const filtered = insights.filter(insight => {
+        const related = Array.isArray(insight?.related_items) ? insight.related_items : []
+        if (!related.length) return false
+        return related.some(item => allowed.has(String(item || '').trim()))
+      })
+      return filtered.length ? filtered : null
+    }
+
+    const buildGuidanceVisualizationCards = (payload = {}, question = '') => {
+      if (!payload || typeof payload !== 'object') return []
+      const spec = payload.visualization_spec || payload.visualizationSpec || {}
+      if (!spec || typeof spec !== 'object') return []
+      const cards = []
+
+      const operatingGoal = spec.operating_goal || spec.operatingGoal || {}
+      if (operatingGoal.chart_type === 'status_card') {
+        const toneCard = buildGuidanceToneCard(payload)
+        if (toneCard) {
+          cards.push({
+            id: `${Date.now().toString()}-guidance-tone`,
+            question: sanitizeCardTitle(toneCard.title || '经营基调状态卡'),
+            timestamp: new Date(),
+            data: {
+              has_visualization: true,
+              type: 'insight_card',
+              meta_type: 'guidance_tone',
+              title: toneCard.title,
+              headline: toneCard.headline,
+              contribution: toneCard.contribution
+            },
+            type: 'insight_card',
+            source: 'guidance_tone'
+          })
+        }
+      }
+
+      const keyMetrics = spec.key_metrics || spec.keyMetrics || {}
+      if (keyMetrics.chart_type === 'status_bar' && Array.isArray(keyMetrics.items)) {
+        const labels = []
+        const values = []
+        const notes = []
+        const findings = []
+        keyMetrics.items.forEach(item => {
+          const valueNum = parseNumericValue(item?.value)
+          if (valueNum === null || !item?.name) return
+          labels.push(String(item.name))
+          values.push(valueNum)
+          const noteText = String(item?.note || '').trim()
+          notes.push(noteText)
+          if (noteText) {
+            findings.push(`${item.name}：${noteText}`)
+          } else {
+            findings.push(`${item.name}：${item.value || valueNum}`)
+          }
+        })
+        if (labels.length >= 2) {
+          const modelInsights = filterGuidanceInsights(
+            getGuidanceInsights(payload, 'key_metrics'),
+            labels
+          )
+          const insightDescription = notes.filter(Boolean).slice(0, 2).join('；')
+            || `核心指标集中在 ${labels.slice(0, 3).join('、')}`
+          cards.push({
+            id: `${Date.now().toString()}-guidance-metrics`,
+            question: sanitizeCardTitle('核心指标锚点'),
+            timestamp: new Date(),
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'bar',
+                traces: [
+                  {
+                    name: '核心指标',
+                    type: 'bar',
+                    x: labels,
+                    y: values,
+                    text: notes,
+                    hovertemplate: '%{x}<br>%{y}<extra></extra>'
+                  }
+                ],
+                layout: {
+                  title: '核心指标锚点',
+                  xaxis_title: '指标',
+                  yaxis_title: '数值'
+                }
+              }
+            },
+            type: 'chart',
+            source: 'guidance_metrics'
+          })
+        }
+      }
+
+      const executionPath = spec.execution_path || spec.executionPath || {}
+      if (executionPath.chart_type === 'structure_change' && Array.isArray(executionPath.items)) {
+        const labels = []
+        const values = []
+        const findings = []
+        executionPath.items.forEach(item => {
+          const valueNum = parseNumericValue(item?.evidence)
+          if (valueNum === null || !item?.action) return
+          labels.push(String(item.action))
+          values.push(valueNum)
+          findings.push(`${item.action}：${item.evidence || valueNum}`)
+        })
+        if (labels.length >= 2) {
+          const modelInsights = filterGuidanceInsights(
+            getGuidanceInsights(payload, 'execution_path'),
+            labels
+          )
+          const insightDescription = `关键执行路径聚焦在 ${labels.slice(0, 3).join('、')}`
+          cards.push({
+            id: `${Date.now().toString()}-guidance-execution`,
+            question: sanitizeCardTitle('关键执行路径'),
+            timestamp: new Date(),
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'bar',
+                traces: [
+                  {
+                    name: '执行路径',
+                    type: 'bar',
+                    x: labels,
+                    y: values
+                  }
+                ],
+                layout: {
+                  title: '关键执行路径',
+                  xaxis_title: '执行动作',
+                  yaxis_title: '证据数值'
+                }
+              }
+            },
+            type: 'chart',
+            source: 'guidance_execution'
+          })
+        }
+      }
+
+      const uncertainty = spec.uncertainty || {}
+      if (uncertainty.chart_type === 'risk_matrix' && Array.isArray(uncertainty.items)) {
+        const probLabels = []
+        const impactLabels = []
+        const risks = []
+        const findings = []
+        uncertainty.items.forEach(item => {
+          if (!item?.risk || !item?.impact || !item?.probability) return
+          probLabels.push(String(item.probability))
+          impactLabels.push(String(item.impact))
+          const riskName = String(item.risk)
+          risks.push(riskName)
+          findings.push(`${riskName}：概率${item.probability}，影响${item.impact}`)
+        })
+        if (probLabels.length >= 2) {
+          const modelInsights = filterGuidanceInsights(
+            getGuidanceInsights(payload, 'uncertainty'),
+            risks
+          )
+          const insightDescription = `关注风险：${risks.slice(0, 3).join('、')}`
+          cards.push({
+            id: `${Date.now().toString()}-guidance-risk`,
+            question: sanitizeCardTitle('不确定性与边界'),
+            timestamp: new Date(),
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'scatter',
+                traces: [
+                  {
+                    name: '风险矩阵',
+                    type: 'scatter',
+                    mode: 'markers+text',
+                    x: probLabels,
+                    y: impactLabels,
+                    text: risks,
+                    textposition: 'top center'
+                  }
+                ],
+                layout: {
+                  title: '不确定性与边界',
+                  xaxis_title: '概率',
+                  yaxis_title: '影响对象'
+                }
+              }
+            },
+            type: 'chart',
+            source: 'guidance_risk'
+          })
+        }
+      }
+
+      return cards
     }
 
     const formatTableInsight = (insight = '') => {
@@ -796,10 +1134,8 @@ const App = {
           }
           
           if (sectionName === 'financial_review') {
-            const structured = result.structured_response || {}
-            const financialReview = structured.summary
-              ? structured
-              : (structured.financial_review || structured.financialReview || null)
+            const rawContent = result.content || ''
+            const financialReview = extractFinancialReviewPayload(result)
             const summary = financialReview?.summary
             const tables = financialReview?.visualization_tables
             const toolSummary = result.tool_calls?.find(tc => tc.tool_name === 'generate_financial_review')
@@ -820,6 +1156,11 @@ const App = {
                 tables.cash_flow
               ].filter(Boolean)
               
+              const insightSummary = formatFinancialReviewTableInsights(tables)
+              if (insightSummary) {
+                answerText = `${answerText || ''}${answerText ? '<br>' : ''}${insightSummary}`
+              }
+              
               tableList.forEach((table, idx) => {
                 const normalizedTable = {
                   ...table,
@@ -838,6 +1179,8 @@ const App = {
                 })
               })
             }
+
+            answerText = appendFinancialReviewSupplement(answerText, rawContent)
           }
 
           if (sectionName === 'business_guidance') {
@@ -847,6 +1190,12 @@ const App = {
               if (formatted) {
                 answerText = formatted
               }
+              const specCards = buildGuidanceVisualizationCards(payload, question)
+              specCards.forEach(card => {
+                if (!visualizationCards.value.some(existing => existing.source === card.source)) {
+                  visualizationCards.value.push(card)
+                }
+              })
             }
           }
 

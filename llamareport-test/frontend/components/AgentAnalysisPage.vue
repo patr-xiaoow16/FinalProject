@@ -166,9 +166,12 @@
                 <div v-if="viz.data?.type === 'insight_card'" class="insight-card">
                   <div class="insight-card-title">{{ viz.data.title || '业务亮点洞察' }}</div>
                   <div v-if="viz.data.headline" class="insight-card-headline">{{ viz.data.headline }}</div>
-                  <div v-if="viz.data.contribution" class="insight-card-row">
-                    <span class="insight-label">贡献：</span>{{ viz.data.contribution }}
-                  </div>
+                <div v-if="viz.data.contribution" class="insight-card-row">
+                  <span class="insight-label">{{ viz.data.meta_type === 'guidance_tone' ? '目标优先级：' : '贡献：' }}</span>
+                  {{ viz.data.meta_type === 'guidance_tone'
+                    ? viz.data.contribution.replace('目标优先级：', '')
+                    : viz.data.contribution }}
+                </div>
                   <div v-if="viz.data.drivers && viz.data.drivers.length" class="insight-card-row">
                     <span class="insight-label">驱动：</span>{{ viz.data.drivers.join('；') }}
                   </div>
@@ -443,6 +446,258 @@ export default {
       const title = viz.data?.table?.title || viz.question || ''
       const hiddenTitles = ['零售银行业务指标', '对公银行业务指标', '同业与资金业务指标']
       return hiddenTitles.some(item => String(title).includes(item))
+    },
+    parseNumericValue(value = '') {
+      const text = String(value).replace(/,/g, '').trim()
+      const match = text.match(/-?\d+(\.\d+)?/)
+      if (!match) return null
+      return Number(match[0])
+    },
+    buildGuidanceToneCard(payload) {
+      if (!payload || typeof payload !== 'object') return null
+      const spec = payload.visualization_spec || payload.visualizationSpec || {}
+      const operatingGoal = spec.operating_goal || spec.operatingGoal || {}
+      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
+      const stageMatch = String(expectedPerformance).match(/(进攻|防守|转型|稳健)/)
+      const stageText = stageMatch ? stageMatch[0] : (operatingGoal.stage || operatingGoal.focus || '—')
+      const priorityText = Array.isArray(operatingGoal.key_elements)
+        ? operatingGoal.key_elements.join(' > ')
+        : (operatingGoal.priority || operatingGoal.purpose || '—')
+      return {
+        title: '经营基调状态卡',
+        headline: `经营阶段：${stageText || '—'}`,
+        contribution: `目标优先级：${priorityText || '—'}`
+      }
+    },
+    buildGuidanceInsights(description, findings = []) {
+      const cleanFindings = Array.isArray(findings)
+        ? findings.map(item => String(item || '').trim()).filter(Boolean)
+        : []
+      const cleanDescription = String(description || '').trim()
+      if (!cleanDescription && cleanFindings.length === 0) return []
+      return [
+        {
+          insight_type: 'comparison',
+          description: cleanDescription || cleanFindings[0] || '要点概览',
+          key_findings: cleanFindings.length > 0
+            ? cleanFindings
+            : (cleanDescription ? [cleanDescription] : [])
+        }
+      ]
+    },
+    getGuidanceInsights(payload = {}, key) {
+      const insightsRoot = payload.visualization_insights || payload.visualizationInsights || {}
+      const section = insightsRoot && typeof insightsRoot === 'object' ? insightsRoot[key] : null
+      if (!section) return null
+      if (Array.isArray(section)) return section
+      if (Array.isArray(section.insights)) return section.insights
+      return null
+    },
+    filterGuidanceInsights(insights = [], allowedItems = []) {
+      if (!Array.isArray(insights)) return null
+      const allowed = new Set(allowedItems.map(item => String(item || '').trim()).filter(Boolean))
+      if (!allowed.size) return insights.length ? insights : null
+      const filtered = insights.filter(insight => {
+        const related = Array.isArray(insight?.related_items) ? insight.related_items : []
+        if (!related.length) return false
+        return related.some(item => allowed.has(String(item || '').trim()))
+      })
+      return filtered.length ? filtered : null
+    },
+    buildGuidanceVisualizationCards(payload) {
+      if (!payload || typeof payload !== 'object') return []
+      const spec = payload.visualization_spec || payload.visualizationSpec || {}
+      if (!spec || typeof spec !== 'object') return []
+      const cards = []
+
+      const operatingGoal = spec.operating_goal || spec.operatingGoal || {}
+      if (operatingGoal.chart_type === 'status_card') {
+        const toneCard = this.buildGuidanceToneCard(payload)
+        if (toneCard) {
+          cards.push({
+            id: 'guidance-tone-card',
+            question: toneCard.title || '经营基调状态卡',
+            source: 'guidance_tone',
+            data: {
+              has_visualization: true,
+              type: 'insight_card',
+              meta_type: 'guidance_tone',
+              title: toneCard.title,
+              headline: toneCard.headline,
+              contribution: toneCard.contribution
+            }
+          })
+        }
+      }
+
+      const keyMetrics = spec.key_metrics || spec.keyMetrics || {}
+      if (keyMetrics.chart_type === 'status_bar' && Array.isArray(keyMetrics.items)) {
+        const labels = []
+        const values = []
+        const notes = []
+        const findings = []
+        keyMetrics.items.forEach(item => {
+          const valueNum = this.parseNumericValue(item?.value)
+          if (valueNum === null || !item?.name) return
+          labels.push(String(item.name))
+          values.push(valueNum)
+          const noteText = String(item?.note || '').trim()
+          notes.push(noteText)
+          if (noteText) {
+            findings.push(`${item.name}：${noteText}`)
+          } else {
+            findings.push(`${item.name}：${item.value || valueNum}`)
+          }
+        })
+        if (labels.length >= 2) {
+          const modelInsights = this.filterGuidanceInsights(
+            this.getGuidanceInsights(payload, 'key_metrics'),
+            labels
+          )
+          const insightDescription = notes.filter(Boolean).slice(0, 2).join('；')
+            || `核心指标集中在 ${labels.slice(0, 3).join('、')}`
+          cards.push({
+            id: 'guidance-metrics-chart',
+            question: '核心指标锚点',
+            source: 'guidance_metrics',
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || this.buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'bar',
+                traces: [
+                  {
+                    name: '核心指标',
+                    type: 'bar',
+                    x: labels,
+                    y: values,
+                    text: notes,
+                    hovertemplate: '%{x}<br>%{y}<extra></extra>'
+                  }
+                ],
+                layout: {
+                  title: '核心指标锚点',
+                  xaxis_title: '指标',
+                  yaxis_title: '数值'
+                }
+              }
+            }
+          })
+        }
+      }
+
+      const executionPath = spec.execution_path || spec.executionPath || {}
+      if (executionPath.chart_type === 'structure_change' && Array.isArray(executionPath.items)) {
+        const labels = []
+        const values = []
+        const findings = []
+        executionPath.items.forEach(item => {
+          const valueNum = this.parseNumericValue(item?.evidence)
+          if (valueNum === null || !item?.action) return
+          labels.push(String(item.action))
+          values.push(valueNum)
+          findings.push(`${item.action}：${item.evidence || valueNum}`)
+        })
+        if (labels.length >= 2) {
+          const modelInsights = this.filterGuidanceInsights(
+            this.getGuidanceInsights(payload, 'execution_path'),
+            labels
+          )
+          const insightDescription = `关键执行路径聚焦在 ${labels.slice(0, 3).join('、')}`
+          cards.push({
+            id: 'guidance-execution-chart',
+            question: '关键执行路径',
+            source: 'guidance_execution',
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || this.buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'bar',
+                traces: [
+                  {
+                    name: '执行路径',
+                    type: 'bar',
+                    x: labels,
+                    y: values
+                  }
+                ],
+                layout: {
+                  title: '关键执行路径',
+                  xaxis_title: '执行动作',
+                  yaxis_title: '证据数值'
+                }
+              }
+            }
+          })
+        }
+      }
+
+      const uncertainty = spec.uncertainty || {}
+      if (uncertainty.chart_type === 'risk_matrix' && Array.isArray(uncertainty.items)) {
+        const probLabels = []
+        const impactLabels = []
+        const risks = []
+        const findings = []
+        uncertainty.items.forEach(item => {
+          if (!item?.risk || !item?.impact || !item?.probability) return
+          probLabels.push(String(item.probability))
+          impactLabels.push(String(item.impact))
+          const riskName = String(item.risk)
+          risks.push(riskName)
+          findings.push(`${riskName}：概率${item.probability}，影响${item.impact}`)
+        })
+        if (probLabels.length >= 2) {
+          const modelInsights = this.filterGuidanceInsights(
+            this.getGuidanceInsights(payload, 'uncertainty'),
+            risks
+          )
+          const insightDescription = `关注风险：${risks.slice(0, 3).join('、')}`
+          cards.push({
+            id: 'guidance-risk-chart',
+            question: '不确定性与边界',
+            source: 'guidance_risk',
+            data: {
+              has_visualization: true,
+              visualization_type: 'plotly',
+              insights: modelInsights || this.buildGuidanceInsights(insightDescription, findings),
+              chart_config: {
+                chart_type: 'scatter',
+                traces: [
+                  {
+                    name: '风险矩阵',
+                    type: 'scatter',
+                    mode: 'markers+text',
+                    x: probLabels,
+                    y: impactLabels,
+                    text: risks,
+                    textposition: 'top center'
+                  }
+                ],
+                layout: {
+                  title: '不确定性与边界',
+                  xaxis_title: '概率',
+                  yaxis_title: '影响对象'
+                }
+              }
+            }
+          })
+        }
+      }
+
+      return cards
+    },
+    appendBusinessGuidanceVisualTables(payload) {
+      const cards = this.buildGuidanceVisualizationCards(payload)
+      cards.forEach(card => {
+        const existingIndex = this.visualizations.findIndex(viz => viz.id === card.id)
+        if (existingIndex >= 0) {
+          this.$set(this.visualizations, existingIndex, card)
+          return
+        }
+        this.visualizations.push(card)
+      })
     },
     appendBusinessHighlightsTables(toolOutput) {
       if (!toolOutput || typeof toolOutput !== 'object') return
@@ -1012,6 +1267,7 @@ export default {
               } else if (toolName === 'generate_business_guidance' && toolOutput) {
                 if (this.isBusinessGuidanceObject(toolOutput)) {
                   this.structuredData.businessGuidance = toolOutput
+                  this.appendBusinessGuidanceVisualTables(toolOutput)
                 } else {
                   const textContent = extractTextFromToolOutput(toolOutput)
                   this.structuredData.businessGuidance = textContent || toolOutput
@@ -1053,6 +1309,7 @@ export default {
             }
             if (structured.business_guidance) {
               this.structuredData.businessGuidance = structured.business_guidance
+              this.appendBusinessGuidanceVisualTables(structured.business_guidance)
             }
           }
           

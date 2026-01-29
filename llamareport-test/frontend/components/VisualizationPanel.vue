@@ -175,6 +175,16 @@
                 </div>
                 <div v-if="card.type === 'financial_table' && card.data.table && (card.data.table.insight_html || card.data.table.insight)" class="table-insight" v-html="card.data.table.insight_html || card.data.table.insight">
                 </div>
+                <div v-else-if="card.data?.type === 'insight_card'" class="insight-card">
+                  <div class="insight-card-title">{{ card.data.title || '经营基调状态卡' }}</div>
+                  <div v-if="card.data.headline" class="insight-card-headline">{{ card.data.headline }}</div>
+                  <div v-if="card.data.contribution" class="insight-card-row">
+                    <span class="insight-label">{{ card.data.meta_type === 'guidance_tone' ? '目标优先级：' : '贡献：' }}</span>
+                    {{ card.data.meta_type === 'guidance_tone'
+                      ? card.data.contribution.replace('目标优先级：', '')
+                      : card.data.contribution }}
+                  </div>
+                </div>
                 <!-- Timeline时间轴（纵向布局，紧凑型） -->
                 <div v-else-if="card.data.visualization_type === 'timeline' && card.data.timeline_data" 
                      class="timeline-container">
@@ -1225,6 +1235,36 @@ export default {
   font-size: 0.875rem;
   line-height: 1.6;
   color: #0c4a6e;
+}
+
+.insight-card {
+  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+}
+
+.insight-card-title {
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 6px;
+}
+
+.insight-card-headline {
+  font-size: 0.95rem;
+  color: #1e293b;
+  margin-bottom: 6px;
+}
+
+.insight-card-row {
+  font-size: 0.85rem;
+  color: #334155;
+}
+
+.insight-label {
+  color: #64748b;
+  margin-right: 4px;
 }
 
 .timeline-container {

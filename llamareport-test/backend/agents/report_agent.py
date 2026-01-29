@@ -817,6 +817,21 @@ class ReportAgent:
                                         tool_output_serializable["overall_summary"] = raw_output.get("overall_summary")
                                     if "key_metrics_summary" in raw_output and "key_metrics_summary" not in tool_output_serializable:
                                         tool_output_serializable["key_metrics_summary"] = raw_output.get("key_metrics_summary")
+                            # 业绩指引工具输出可能嵌套在 raw_output 中，展开常用字段便于前端消费
+                            if (
+                                tool_name == "generate_business_guidance"
+                                and isinstance(tool_output_serializable, dict)
+                            ):
+                                raw_output = tool_output_serializable.get("raw_output")
+                                if isinstance(raw_output, str):
+                                    try:
+                                        import json
+                                        raw_output = json.loads(raw_output)
+                                    except Exception:
+                                        raw_output = {}
+                                if isinstance(raw_output, dict):
+                                    for key, value in raw_output.items():
+                                        tool_output_serializable.setdefault(key, value)
 
                             tool_results.append(tool_result)
                             
