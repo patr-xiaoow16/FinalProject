@@ -1,0 +1,135 @@
+# {{ company_name }} {{ report_year }}年年报业绩点评
+
+**报告生成日期**: {{ generation_date }}
+
+---
+
+## 一、财务点评
+
+**财务点评总结**: {{ financial_review.summary }}
+
+---
+
+## 二、业绩指引
+
+**{{ business_guidance.guidance_period }}业绩预告**
+
+**整体业绩指引:**
+
+- **业绩预告期间**: {{ business_guidance.guidance_period }}
+- **预计的经营业绩**: {{ business_guidance.expected_performance }}
+{% if business_guidance.parent_net_profit_range %}
+- **归属于上市公司股东的净利润**: {{ business_guidance.parent_net_profit_range }}{% if business_guidance.parent_net_profit_growth_range %},比上年同期 {{ business_guidance.parent_net_profit_growth_range }}{% endif %}
+{% endif %}
+{% if business_guidance.non_recurring_profit_range %}
+- **扣除非经常性损益后的净利润**: {{ business_guidance.non_recurring_profit_range }}
+{% endif %}
+{% if business_guidance.eps_range %}
+- **基本每股收益**: {{ business_guidance.eps_range }}
+{% endif %}
+{% if business_guidance.revenue_range %}
+- **营业收入**: {{ business_guidance.revenue_range }}
+{% endif %}
+
+{% if business_guidance.business_specific_guidance %}
+**各业务的具体指引:**
+
+{% for guidance in business_guidance.business_specific_guidance %}
+- {{ guidance }}
+{% endfor %}
+{% endif %}
+
+{% if business_guidance.risk_warnings %}
+**风险提示及其他相关说明:**
+
+{% for warning in business_guidance.risk_warnings %}
+- {{ warning }}
+{% endfor %}
+{% endif %}
+
+---
+
+## 三、业务亮点
+
+{% for highlight in business_highlights.highlights %}
+### {{ highlight.business_type }}
+
+{{ highlight.highlights }}
+
+{% if highlight.achievements %}
+**主要成就:**
+
+{% for achievement in highlight.achievements %}
+- {{ achievement }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+**总结**: {{ business_highlights.overall_summary }}
+
+---
+
+## 四、盈利预测和估值
+
+### (一) 盈利预测
+
+**市场整体观点:**
+
+市场整体对{{ company_name }}的投资评级为"{{ profit_forecast_and_valuation.consensus_forecast.market_rating }}"{% if profit_forecast_and_valuation.consensus_forecast.target_price %},一致目标价为 {{ profit_forecast_and_valuation.consensus_forecast.target_price }}{% endif %}{% if profit_forecast_and_valuation.consensus_forecast.upside_potential %},预计有 {{ profit_forecast_and_valuation.consensus_forecast.upside_potential }}的上涨空间{% endif %}。
+
+**一致预测:**
+
+市场对{{ company_name }}未来的关键财务指标预测如下:
+
+- **营业总收入**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.revenue_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **营业收入增长率**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.revenue_growth_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **归母净利润**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.parent_profit_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **EPS(稀释)**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.eps_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **ROE(摊薄)**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.roe_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **ROA**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.roa_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+{% if profit_forecast_and_valuation.consensus_changes %}
+**一致预期变化:**
+
+{{ profit_forecast_and_valuation.consensus_changes }}
+{% endif %}
+
+{% if profit_forecast_and_valuation.institutional_forecasts %}
+**具体机构预测:**
+
+{{ profit_forecast_and_valuation.institutional_forecasts }}
+{% endif %}
+
+### (二) 估值分析
+
+**估值方法**: {{ profit_forecast_and_valuation.valuation_analysis.valuation_method }}
+
+{% if profit_forecast_and_valuation.valuation_analysis.current_valuation %}
+**当前估值**: {{ profit_forecast_and_valuation.valuation_analysis.current_valuation }}
+{% endif %}
+
+{% if profit_forecast_and_valuation.valuation_analysis.valuation_comparison %}
+**估值对比**: {{ profit_forecast_and_valuation.valuation_analysis.valuation_comparison }}
+{% endif %}
+
+---
+
+## 五、总结
+
+{{ overall_summary }}
+
+---
+
+{% if references %}
+## 参考来源
+
+{% for reference in references %}
+[{{ loop.index }}] {{ reference }}
+{% endfor %}
+{% endif %}
+
+---
+
+*本报告由 AI 年报分析系统自动生成*
+

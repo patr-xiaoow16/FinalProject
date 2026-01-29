@@ -1,0 +1,41 @@
+# LlamaReport Backend API - 简化依赖列表
+# 只包含核心功能所需的依赖
+
+# Web框架
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# LlamaIndex 核心组件
+llama-index-core>=0.14.0
+llama-index-llms-openai>=0.4.0
+llama-index-llms-deepseek>=0.2.0
+llama-index-embeddings-openai>=0.5.0
+llama-index-readers-file>=0.5.0
+
+# 向量数据库
+chromadb>=1.1.0
+llama-index-vector-stores-chroma>=0.5.0
+
+# 数据处理
+pandas>=2.2.0
+numpy>=1.26.0
+
+# PDF处理
+pdfplumber>=0.10.0
+
+# Excel处理
+openpyxl>=3.1.0  # 用于读取.xlsx文件
+xlrd>=2.0.0      # 用于读取.xls文件（旧格式）
+
+# AI和ML
+openai>=1.99.0
+
+# 工具库
+python-dotenv>=1.0.0
+pydantic>=2.11.0
+jinja2>=3.1.0
+
+# 开发和测试（可选）
+pytest>=7.0.0
+httpx>=0.24.0  # 用于测试API
