@@ -177,9 +177,9 @@ class ReportAgent:
                 fn=partial(generate_profit_forecast_and_valuation, query_engine=self.query_engine),
                 name="generate_profit_forecast_and_valuation",
                 description=(
-                    "生成盈利预测和估值章节。"
+                    "生成投资策略（相关性分析）章节。"
                     "需要参数: company_name(公司名称), year(年份)。"
-                    "返回一致预测、机构预测、估值分析的结构化数据。"
+                    "返回指标抽取、相关性分析与投资策略结论的结构化数据。"
                 )
             )
             
@@ -267,10 +267,10 @@ class ReportAgent:
    - 主要成就和里程碑
    - 业务创新和突破
 
-四、**盈利预测和估值** (使用 generate_profit_forecast_and_valuation 工具)
-   - 一致预测和市场预期
-   - 机构评级和目标价
-   - 估值分析和投资建议
+四、**投资策略（相关性分析）** (使用 generate_profit_forecast_and_valuation 工具)
+   - 指标自动识别与输入变量表
+   - Pearson相关性分析与核心驱动指标
+   - 投资策略结论与风险提示
 
 五、**综合总结**
    - 基于前四部分生成综合性的投资建议
@@ -296,7 +296,7 @@ class ReportAgent:
 - **财务分析相关**：**只调用** `generate_financial_review`（工具内部会自动检索数据，无需额外调用）
 - **业绩指引相关**：**只调用** `generate_business_guidance`（工具内部会自动检索数据）
 - **业务亮点相关**：**只调用** `generate_business_highlights`（工具内部会自动检索数据）
-- **盈利预测相关**：**只调用** `generate_profit_forecast_and_valuation`（工具内部会自动检索数据）
+- **投资策略相关**：**只调用** `generate_profit_forecast_and_valuation`（工具内部会自动检索数据）
 - **杜邦分析相关**：**只调用** `generate_dupont_analysis`（工具内部会自动检索数据）
 - **可视化需求**：在生成分析后，**只调用** `generate_visualization`
 
@@ -306,7 +306,7 @@ class ReportAgent:
    - `generate_financial_review` → 自动检索并生成财务点评
    - `generate_business_guidance` → 自动检索并生成业绩指引
    - `generate_business_highlights` → 自动检索并生成业务亮点
-   - `generate_profit_forecast_and_valuation` → 自动检索并生成盈利预测
+   - `generate_profit_forecast_and_valuation` → 自动检索并生成投资策略
 2. **可选增强**：
    - 如涉及盈利能力，调用 `generate_dupont_analysis`
    - 识别数值数据，调用 `generate_visualization`
@@ -402,7 +402,7 @@ class ReportAgent:
             if user_query:
                 query = user_query
             else:
-                query = f"请生成{company_name} {year}年的完整年报分析报告,包括财务点评、业绩指引、业务亮点、盈利预测和估值、以及总结。"
+                query = f"请生成{company_name} {year}年的完整年报分析报告,包括财务点评、业绩指引、业务亮点、投资策略（相关性分析）、以及总结。"
             
             # 运行 Agent
             response = await self.agent.run(query)
@@ -430,7 +430,8 @@ class ReportAgent:
         self,
         section_name: str,
         company_name: str,
-        year: str
+        year: str,
+        model_type: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         生成单个章节
@@ -450,12 +451,50 @@ class ReportAgent:
                 "financial_review": "财务点评",
                 "business_guidance": "业绩指引",
                 "business_highlights": "业务亮点",
-                "profit_forecast": "盈利预测和估值"
+                "profit_forecast": "投资策略（相关性分析）"
             }
             
             section_chinese = section_map.get(section_name, section_name)
             query = f"请生成{company_name} {year}年的{section_chinese}章节。"
+            if section_name == "profit_forecast" and model_type:
+                query = f"{query} 优先使用{model_type}模型。"
             
+            # 投资策略支持模型选择，直接调用工具避免模型参数丢失
+            if section_name == "profit_forecast" and model_type:
+                tool_output = await generate_profit_forecast_and_valuation(
+                    company_name=company_name,
+                    year=year,
+                    query_engine=self.query_engine,
+                    model_type=model_type
+                )
+                summary_text = None
+                if isinstance(tool_output, dict):
+                    conclusion = tool_output.get("strategy_conclusion") or {}
+                    clustering = tool_output.get("clustering_model") or {}
+                    parts = []
+                    short_term = conclusion.get("short_term")
+                    long_term = conclusion.get("long_term")
+                    risk_control = conclusion.get("risk_control")
+                    if short_term:
+                        parts.append(f"短期配置：{short_term}")
+                    if long_term:
+                        parts.append(f"长期配置：{long_term}")
+                    if risk_control:
+                        parts.append(f"风险管控：{risk_control}")
+                    if model_type == "clustering":
+                        clustering_conclusion = clustering.get("conclusion") if isinstance(clustering, dict) else None
+                        if isinstance(clustering_conclusion, dict) and clustering_conclusion.get("current_position"):
+                            parts.append(clustering_conclusion.get("current_position"))
+                    summary_text = "；".join([p for p in parts if p])
+                return {
+                    "status": "success",
+                    "section_name": section_name,
+                    "content": summary_text or "",
+                    "structured_response": {"profit_forecast_and_valuation": tool_output},
+                    "visualization": None,
+                    "tool_calls": []
+                }
+
             # 使用query管线，确保可视化与精简输出一致
             result = await self.query(query)
 
@@ -737,27 +776,46 @@ class ReportAgent:
                                         if snippet_list:
                                             summary_text = "；".join(snippet_list)
                                 elif tool_name == "generate_profit_forecast_and_valuation":
-                                    consensus = raw_output.get("consensus_forecast") or {}
-                                    valuation = raw_output.get("valuation_analysis") or {}
-                                    market_rating = consensus.get("market_rating")
-                                    target_price = consensus.get("target_price")
-                                    upside = consensus.get("upside_potential")
-                                    valuation_method = valuation.get("valuation_method")
-                                    current_valuation = valuation.get("current_valuation")
+                                    conclusions = raw_output.get("strategy_conclusion") or {}
+                                    correlation_results = raw_output.get("correlation_results") or []
+                                    data_sufficiency = raw_output.get("data_sufficiency") or {}
+
                                     parts = []
-                                    if market_rating:
-                                        parts.append(f"市场评级：{market_rating}")
-                                    if target_price:
-                                        parts.append(f"一致目标价：{target_price}")
-                                    if upside:
-                                        parts.append(f"上涨空间：{upside}")
-                                    if valuation_method or current_valuation:
-                                        metrics = []
-                                        if valuation_method:
-                                            metrics.append(f"估值方法：{valuation_method}")
-                                        if current_valuation:
-                                            metrics.append(f"当前估值：{current_valuation}")
-                                        parts.append("估值信息：" + "，".join(metrics))
+                                    short_term = conclusions.get("short_term")
+                                    long_term = conclusions.get("long_term")
+                                    risk_control = conclusions.get("risk_control")
+                                    if short_term:
+                                        parts.append(f"短期配置：{short_term}")
+                                    if long_term:
+                                        parts.append(f"长期配置：{long_term}")
+                                    if risk_control:
+                                        parts.append(f"风险管控：{risk_control}")
+
+                                    corr_items = []
+                                    for item in correlation_results:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        r_value = item.get("correlation")
+                                        if isinstance(r_value, (int, float)):
+                                            corr_items.append((abs(r_value), r_value, item))
+                                    if corr_items:
+                                        corr_items.sort(reverse=True)
+                                        corr_summaries = []
+                                        for _, r_value, item in corr_items[:2]:
+                                            target = item.get("target_metric") or "目标指标"
+                                            driver = item.get("driver_metric") or "驱动指标"
+                                            significance = item.get("significance")
+                                            corr_label = f"{r_value:+.2f}"
+                                            if significance:
+                                                corr_label = f"{corr_label}/{significance}"
+                                            corr_summaries.append(f"{target}-{driver}({corr_label})")
+                                        if corr_summaries:
+                                            parts.append("相关性要点：" + "；".join(corr_summaries))
+
+                                    if isinstance(data_sufficiency, dict) and data_sufficiency.get("is_sufficient") is False:
+                                        reason = data_sufficiency.get("reason") or "样本不足"
+                                        parts.append(f"数据不足：{reason}")
+
                                     summary_text = "；".join([p for p in parts if p])
                                 elif tool_name == "generate_dupont_analysis":
                                     level1 = raw_output.get("level1") or {}

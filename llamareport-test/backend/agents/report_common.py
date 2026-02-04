@@ -3,7 +3,7 @@ Report shared helpers for data retrieval and validation.
 """
 
 import logging
-from typing import Dict, Any, List, Optional, Annotated
+from typing import Dict, Any, List, Optional, Annotated, Tuple
 
 from llama_index.core.tools import QueryEngineTool
 
@@ -44,6 +44,174 @@ def _validate_and_clean_data(data: Dict[str, Any], model_class) -> Dict[str, Any
                 continue
             cleaned[key] = value
         return cleaned
+
+
+def _parse_numeric_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+    if text in {"/", "-", "—"}:
+        return None
+    # 提取数字
+    import re
+    match = re.search(r"-?\d+(\.\d+)?", text)
+    if not match:
+        return None
+    num = float(match.group(0))
+    # 单位处理
+    if "万亿" in text:
+        num *= 1e12
+    elif "亿" in text:
+        num *= 1e8
+    elif "万" in text:
+        num *= 1e4
+    return num
+
+
+def _infer_role_from_variable_type(variable_type: Optional[str]) -> Optional[str]:
+    if not variable_type:
+        return None
+    if "因变量" in variable_type:
+        return "因变量"
+    if "自变量" in variable_type:
+        return "自变量"
+    return None
+
+
+def _build_metric_series(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    default_period: Optional[str]
+) -> Dict[str, Dict[str, Any]]:
+    series_map: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_metric(name: str) -> Dict[str, Any]:
+        if name not in series_map:
+            series_map[name] = {
+                "role": None,
+                "category": None,
+                "series": {}
+            }
+        return series_map[name]
+
+    for item in indicator_extraction or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("metric")
+        if not name:
+            continue
+        record = _ensure_metric(name)
+        if item.get("variable_role"):
+            record["role"] = item.get("variable_role")
+        if item.get("category"):
+            record["category"] = item.get("category")
+        period = item.get("period") or default_period
+        value = _parse_numeric_value(item.get("value"))
+        if period and value is not None:
+            record["series"][str(period)] = value
+
+    for row in variable_table or []:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("metric")
+        if not name:
+            continue
+        record = _ensure_metric(name)
+        role = _infer_role_from_variable_type(row.get("variable_type"))
+        if role:
+            record["role"] = role
+        period = row.get("period") or default_period
+        value = _parse_numeric_value(row.get("value"))
+        if period and value is not None:
+            record["series"][str(period)] = value
+
+    return series_map
+
+
+def _pearson_correlation(x: List[float], y: List[float]) -> Optional[float]:
+    if len(x) < 3 or len(y) < 3:
+        return None
+    import math
+    mean_x = sum(x) / len(x)
+    mean_y = sum(y) / len(y)
+    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+    var_x = sum((xi - mean_x) ** 2 for xi in x)
+    var_y = sum((yi - mean_y) ** 2 for yi in y)
+    if var_x == 0 or var_y == 0:
+        return None
+    return cov / math.sqrt(var_x * var_y)
+
+
+def _correlation_label(value: Optional[float]) -> Optional[str]:
+    if value is None:
+        return None
+    abs_value = abs(value)
+    if abs_value >= 0.85:
+        strength = "强"
+    elif abs_value >= 0.7:
+        strength = "中强"
+    elif abs_value >= 0.5:
+        strength = "中等"
+    else:
+        strength = "弱"
+    direction = "正" if value >= 0 else "负"
+    return f"{strength}{direction}相关"
+
+
+def build_correlation_results(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    default_period: Optional[str]
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    series_map = _build_metric_series(indicator_extraction, variable_table, default_period)
+    targets = [name for name, info in series_map.items() if info.get("role") == "因变量"]
+    drivers = [name for name, info in series_map.items() if info.get("role") == "自变量"]
+
+    results: List[Dict[str, Any]] = []
+    max_samples = 0
+
+    for target in targets:
+        target_series = series_map[target]["series"]
+        for driver in drivers:
+            if driver == target:
+                continue
+            driver_series = series_map[driver]["series"]
+            shared_periods = sorted(set(target_series.keys()) & set(driver_series.keys()))
+            if len(shared_periods) < 3:
+                max_samples = max(max_samples, len(shared_periods))
+                continue
+            x = [target_series[p] for p in shared_periods]
+            y = [driver_series[p] for p in shared_periods]
+            corr = _pearson_correlation(x, y)
+            max_samples = max(max_samples, len(shared_periods))
+            results.append({
+                "target_metric": target,
+                "driver_metric": driver,
+                "correlation": corr,
+                "significance": _correlation_label(corr),
+                "interpretation": None,
+                "data_points": len(shared_periods)
+            })
+
+    data_sufficiency = {
+        "is_sufficient": bool(results),
+        "reason": None,
+        "sample_description": None
+    }
+    if not results:
+        reason = "可用于相关性计算的共同样本不足（至少需要3个时间点）"
+        if not targets or not drivers:
+            reason = "缺少因变量或自变量指标，无法计算相关性"
+        data_sufficiency["is_sufficient"] = False
+        data_sufficiency["reason"] = reason
+        if max_samples:
+            data_sufficiency["sample_description"] = f"最大可用样本数：{max_samples}"
+
+    return results, data_sufficiency
 
 
 def create_query_engine_tool(query_engine, name: str, description: str) -> QueryEngineTool:

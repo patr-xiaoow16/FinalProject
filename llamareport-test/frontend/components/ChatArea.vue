@@ -41,15 +41,23 @@
               <span class="btn-icon">⭐</span>
               <span class="btn-text">业务亮点</span>
             </button>
-            <button 
-              class="quick-btn profit-forecast" 
-              @click="handleQuickAnalysis('profit_forecast')"
-              :disabled="loading"
-              title="生成盈利预测分析"
-            >
-              <span class="btn-icon">📈</span>
-              <span class="btn-text">盈利预测</span>
-            </button>
+            <div class="strategy-model-wrapper">
+              <button 
+                class="quick-btn profit-forecast" 
+                @click="toggleStrategyModelMenu"
+                :disabled="loading"
+                title="生成投资策略分析"
+              >
+                <span class="btn-icon">📈</span>
+                <span class="btn-text">投资策略</span>
+              </button>
+              <div v-if="showStrategyModelMenu" class="strategy-model-menu">
+                <div class="strategy-model-title">选择模型</div>
+                <button class="strategy-model-option" @click="handleStrategyModelSelect('correlation')">相关性分析</button>
+                <button class="strategy-model-option" @click="handleStrategyModelSelect('clustering')">聚类分析</button>
+                <button class="strategy-model-option" @click="handleStrategyModelSelect('all')">综合输出</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="chat-messages" ref="messagesContainer">
@@ -135,7 +143,8 @@ export default {
     return { 
       inputText: '', 
       showSuggestions: false,
-      hoveredMessageIndex: null
+      hoveredMessageIndex: null,
+      showStrategyModelMenu: false
     }; 
   },
   methods: {
@@ -169,7 +178,7 @@ export default {
     handleDupontAnalysis() {
       this.$emit('dupont-analysis');
     },
-    async handleQuickAnalysis(analysisType) {
+    async handleQuickAnalysis(analysisType, modelType = null) {
       if (this.loading) return;
       
       // 特殊处理：杜邦分析 - 直接使用上方的杜邦分析按钮逻辑（沿用相同的视图）
@@ -184,7 +193,7 @@ export default {
         'financial_review': '财务点评',
         'business_guidance': '业绩指引',
         'business_highlights': '业务亮点',
-        'profit_forecast': '盈利预测和估值',
+        'profit_forecast': '投资策略',
         'dupont_analysis': '杜邦分析'
       };
       
@@ -275,12 +284,38 @@ export default {
           companyName,
           year,
           question,
-          typeName
+          typeName,
+          modelType
         });
       } else {
         // 触发agent-query事件（无法拆解出公司/年份时回退）
-        this.$emit('agent-query', question);
+        const modelHint = modelType && analysisType === 'profit_forecast'
+          ? `（使用${modelType}模型）`
+          : '';
+        this.$emit('agent-query', `${question}${modelHint}`);
       }
+    },
+    toggleStrategyModelMenu() {
+      if (this.loading) return;
+      this.showStrategyModelMenu = !this.showStrategyModelMenu;
+      if (this.showStrategyModelMenu) {
+        const handleClickOutside = (event) => {
+          const menu = this.$el.querySelector('.strategy-model-menu');
+          const wrapper = this.$el.querySelector('.strategy-model-wrapper');
+          if (!menu || !wrapper) return;
+          if (!wrapper.contains(event.target)) {
+            this.showStrategyModelMenu = false;
+            document.removeEventListener('click', handleClickOutside);
+          }
+        };
+        setTimeout(() => {
+          document.addEventListener('click', handleClickOutside);
+        }, 0);
+      }
+    },
+    handleStrategyModelSelect(modelType) {
+      this.showStrategyModelMenu = false;
+      this.handleQuickAnalysis('profit_forecast', modelType);
     },
     isProcessingSummary(content) {
       if (!content) return false;

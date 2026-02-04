@@ -70,47 +70,82 @@
 
 ---
 
-## 四、盈利预测和估值
+## 四、投资策略（相关性分析）
 
-### (一) 盈利预测
+### (一) 指标自动识别与抽取
 
-**市场整体观点:**
-
-市场整体对{{ company_name }}的投资评级为"{{ profit_forecast_and_valuation.consensus_forecast.market_rating }}"{% if profit_forecast_and_valuation.consensus_forecast.target_price %},一致目标价为 {{ profit_forecast_and_valuation.consensus_forecast.target_price }}{% endif %}{% if profit_forecast_and_valuation.consensus_forecast.upside_potential %},预计有 {{ profit_forecast_and_valuation.consensus_forecast.upside_potential }}的上涨空间{% endif %}。
-
-**一致预测:**
-
-市场对{{ company_name }}未来的关键财务指标预测如下:
-
-- **营业总收入**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.revenue_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-- **营业收入增长率**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.revenue_growth_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-- **归母净利润**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.parent_profit_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-- **EPS(稀释)**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.eps_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-- **ROE(摊薄)**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.roe_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-- **ROA**: {% for year, value in profit_forecast_and_valuation.consensus_forecast.roa_forecast.items() %}{{ year }}年 {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
-
-{% if profit_forecast_and_valuation.consensus_changes %}
-**一致预期变化:**
-
-{{ profit_forecast_and_valuation.consensus_changes }}
+{% if profit_forecast_and_valuation.indicator_extraction %}
+{% for item in profit_forecast_and_valuation.indicator_extraction %}
+- {{ item.category }} / {{ item.variable_role }} / {{ item.name }}{% if item.value %}：{{ item.value }}{% if item.unit %}{{ item.unit }}{% endif %}{% endif %}{% if item.period %}（{{ item.period }}）{% endif %}
+{% endfor %}
+{% else %}
+未识别到可用指标。
 {% endif %}
 
-{% if profit_forecast_and_valuation.institutional_forecasts %}
-**具体机构预测:**
+### (二) 输入变量表
 
-{{ profit_forecast_and_valuation.institutional_forecasts }}
+| 变量类型 | 具体指标 | 取值 | 期间 | 单位 |
+| --- | --- | --- | --- | --- |
+{% for row in profit_forecast_and_valuation.variable_table %}
+| {{ row.variable_type }} | {{ row.metric }} | {{ row.value or "-" }} | {{ row.period or "-" }} | {{ row.unit or "-" }} |
+{% endfor %}
+
+### (三) 相关性分析结果
+
+{% if profit_forecast_and_valuation.data_sufficiency and profit_forecast_and_valuation.data_sufficiency.is_sufficient == false %}
+**数据说明**: {{ profit_forecast_and_valuation.data_sufficiency.reason or "样本不足" }}{% if profit_forecast_and_valuation.data_sufficiency.sample_description %}（{{ profit_forecast_and_valuation.data_sufficiency.sample_description }}）{% endif %}
 {% endif %}
 
-### (二) 估值分析
-
-**估值方法**: {{ profit_forecast_and_valuation.valuation_analysis.valuation_method }}
-
-{% if profit_forecast_and_valuation.valuation_analysis.current_valuation %}
-**当前估值**: {{ profit_forecast_and_valuation.valuation_analysis.current_valuation }}
+{% if profit_forecast_and_valuation.correlation_results %}
+{% for item in profit_forecast_and_valuation.correlation_results %}
+- {{ item.target_metric }} - {{ item.driver_metric }}：{% if item.correlation is not none %}r={{ item.correlation }}{% else %}r=NA{% endif %}{% if item.significance %}；{{ item.significance }}{% endif %}{% if item.interpretation %}；{{ item.interpretation }}{% endif %}
+{% endfor %}
+{% else %}
+暂无可计算的相关性结果。
 {% endif %}
 
-{% if profit_forecast_and_valuation.valuation_analysis.valuation_comparison %}
-**估值对比**: {{ profit_forecast_and_valuation.valuation_analysis.valuation_comparison }}
+### (四) 核心结论与应用
+
+- **短期配置**：{{ profit_forecast_and_valuation.strategy_conclusion.short_term }}
+- **长期配置**：{{ profit_forecast_and_valuation.strategy_conclusion.long_term }}
+- **风险管控**：{{ profit_forecast_and_valuation.strategy_conclusion.risk_control }}
+{% if profit_forecast_and_valuation.strategy_conclusion.key_signals %}
+
+**关键指标信号**：{{ profit_forecast_and_valuation.strategy_conclusion.key_signals | join("；") }}
+{% endif %}
+
+### (五) 聚类分析模型（客群-标的适配分组）
+
+{% if profit_forecast_and_valuation.clustering_model %}
+**方法**：{{ profit_forecast_and_valuation.clustering_model.method }}，K={{ profit_forecast_and_valuation.clustering_model.k }}
+
+**聚类变量设计表**
+
+| 聚类维度 | 标的聚类变量 | 平安银行数据取值 | 行业对标数据（同年） |
+| --- | --- | --- | --- |
+{% for row in profit_forecast_and_valuation.clustering_model.variable_table %}
+| {{ row.dimension }} | {{ row.metric }} | {{ row.company_value or "-" }} | {{ row.industry_benchmark or "-" }} |
+{% endfor %}
+
+**聚类结果表**
+
+| 聚类组别 | 标的特征 | 平安银行归属 | 适配投资需求特征 | 时间-风险分层 |
+| --- | --- | --- | --- | --- |
+{% for group in profit_forecast_and_valuation.clustering_model.group_results %}
+| {{ group.group_name }} | {{ group.feature_profile }} | {{ group.company_assignment }} | {{ group.investor_profile }} | {{ group.time_risk_bucket }} |
+{% endfor %}
+
+**核心结论与应用**
+
+- {{ profit_forecast_and_valuation.clustering_model.conclusion.current_position }}
+{% if profit_forecast_and_valuation.clustering_model.conclusion.upgrade_conditions %}
+- {{ profit_forecast_and_valuation.clustering_model.conclusion.upgrade_conditions }}
+{% endif %}
+{% if profit_forecast_and_valuation.clustering_model.conclusion.high_growth_conditions %}
+- {{ profit_forecast_and_valuation.clustering_model.conclusion.high_growth_conditions }}
+{% endif %}
+{% else %}
+暂无聚类分析结果。
 {% endif %}
 
 ---

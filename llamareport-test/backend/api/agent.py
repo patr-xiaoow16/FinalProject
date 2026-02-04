@@ -123,6 +123,10 @@ class GenerateSectionRequest(BaseModel):
     )
     company_name: str = Field(description="公司名称")
     year: str = Field(description="年份")
+    model_type: Optional[str] = Field(
+        default=None,
+        description="投资策略模型类型: correlation, clustering, all"
+    )
 
 
 class AgentQueryRequest(BaseModel):
@@ -199,7 +203,7 @@ async def generate_section(request: GenerateSectionRequest):
     """
     生成单个报告章节
     
-    可以单独生成财务点评、业绩指引、业务亮点或盈利预测章节
+    可以单独生成财务点评、业绩指引、业务亮点或投资策略（相关性分析）章节
     """
     try:
         logger.info(f"收到生成章节请求: {request.section_name}")
@@ -219,7 +223,8 @@ async def generate_section(request: GenerateSectionRequest):
         result = await agent.generate_section(
             section_name=request.section_name,
             company_name=request.company_name,
-            year=request.year
+            year=request.year,
+            model_type=request.model_type
         )
         
         if result["status"] == "error":

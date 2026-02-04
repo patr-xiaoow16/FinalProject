@@ -171,36 +171,95 @@ class BusinessHighlights(BaseModel):
     )
 
 
-# ==================== 盈利预测和估值模型 ====================
+# ==================== 投资策略模型（相关性分析） ====================
 
-class ConsensusForecas(BaseModel):
-    """一致预测"""
-    market_rating: str = Field(description="市场整体投资评级,如'持有'、'买入'")
-    target_price: Optional[str] = Field(default=None, description="一致目标价")
-    upside_potential: Optional[str] = Field(default=None, description="上涨空间")
-    
-    # 关键财务指标预测
-    revenue_forecast: Dict[str, str] = Field(description="营业总收入预测,按年份")
-    revenue_growth_forecast: Dict[str, str] = Field(description="营业收入增长率预测,按年份")
-    parent_profit_forecast: Dict[str, str] = Field(description="归母净利润预测,按年份")
-    eps_forecast: Dict[str, str] = Field(description="EPS预测,按年份")
-    roe_forecast: Dict[str, str] = Field(description="ROE预测,按年份")
-    roa_forecast: Dict[str, str] = Field(description="ROA预测,按年份")
+class StrategyIndicator(BaseModel):
+    """指标抽取项"""
+    name: str = Field(description="指标名称")
+    category: str = Field(description="指标分类，如'收益类'、'盈利类'、'风险类'、'业务类'、'估值类'、'风险敞口类'等")
+    variable_role: str = Field(description="变量角色：'因变量'或'自变量'")
+    value: Optional[str] = Field(default=None, description="指标取值（保留原始格式）")
+    unit: Optional[str] = Field(default=None, description="单位，如'%'、'倍'")
+    period: Optional[str] = Field(default=None, description="对应期间/年份")
+    source_excerpt: Optional[str] = Field(default=None, description="来源片段（用于可追溯）")
 
 
-class ValuationAnalysis(BaseModel):
-    """估值分析"""
-    valuation_method: str = Field(description="估值方法,如'PE TTM'")
-    current_valuation: Optional[str] = Field(default=None, description="当前估值")
-    valuation_comparison: Optional[str] = Field(default=None, description="估值对比分析")
+class VariableTableRow(BaseModel):
+    """输入变量表条目"""
+    variable_type: str = Field(description="变量类型，如'收益类（因变量）'、'盈利类（自变量）'")
+    metric: str = Field(description="具体指标名称")
+    value: Optional[str] = Field(default=None, description="指标取值")
+    period: Optional[str] = Field(default=None, description="对应期间/年份")
+    unit: Optional[str] = Field(default=None, description="单位")
+
+
+class CorrelationResult(BaseModel):
+    """相关系数矩阵核心结果"""
+    target_metric: str = Field(description="关联维度/被解释指标")
+    driver_metric: str = Field(description="驱动指标")
+    correlation: Optional[float] = Field(default=None, description="Pearson相关系数r，无法计算时为null")
+    significance: Optional[str] = Field(default=None, description="显著性解读，如'强正相关'、'强负相关'、'中强相关'")
+    interpretation: Optional[str] = Field(default=None, description="解读说明")
+    data_points: Optional[int] = Field(default=None, description="样本数/时间点数量")
+
+
+class StrategyConclusion(BaseModel):
+    """核心结论与应用"""
+    short_term: str = Field(description="短期配置结论")
+    long_term: str = Field(description="长期配置结论")
+    risk_control: str = Field(description="风险管控结论")
+    key_signals: Optional[List[str]] = Field(default=None, description="关键指标信号列表")
+
+
+class DataSufficiency(BaseModel):
+    """数据充分性说明"""
+    is_sufficient: bool = Field(description="是否满足相关性计算的样本要求")
+    reason: Optional[str] = Field(default=None, description="不足原因说明")
+    sample_description: Optional[str] = Field(default=None, description="样本说明，如'2019-2024年6期年报'")
+
+
+class ClusteringVariableRow(BaseModel):
+    """聚类变量设计表条目"""
+    dimension: str = Field(description="聚类维度，如'估值维度'")
+    metric: str = Field(description="标的聚类变量，如'市净率（PB）'")
+    company_value: Optional[str] = Field(default=None, description="平安银行数据取值")
+    industry_benchmark: Optional[str] = Field(default=None, description="行业对标数据（同年）")
+
+
+class ClusteringGroupResult(BaseModel):
+    """聚类结果条目"""
+    group_name: str = Field(description="聚类组别名称")
+    feature_profile: str = Field(description="标的特征")
+    company_assignment: str = Field(description="平安银行归属")
+    investor_profile: str = Field(description="适配投资需求特征")
+    time_risk_bucket: str = Field(description="时间-风险分层")
+
+
+class ClusteringConclusion(BaseModel):
+    """聚类结论与应用"""
+    current_position: str = Field(description="当前分组结论")
+    upgrade_conditions: Optional[str] = Field(default=None, description="升级到稳健增长组条件")
+    high_growth_conditions: Optional[str] = Field(default=None, description="进入高增长高弹性组条件")
+
+
+class ClusteringModel(BaseModel):
+    """聚类分析模型（客群-标的适配分组）"""
+    method: str = Field(description="聚类方法，如'K-means'")
+    k: int = Field(description="聚类组数")
+    variable_table: List[ClusteringVariableRow] = Field(description="聚类变量设计表")
+    group_results: List[ClusteringGroupResult] = Field(description="聚类结果表")
+    conclusion: ClusteringConclusion = Field(description="核心结论与应用")
 
 
 class ProfitForecastAndValuation(BaseModel):
-    """盈利预测和估值(第四部分)"""
-    consensus_forecast: ConsensusForecas = Field(description="一致预测")
-    consensus_changes: Optional[str] = Field(default=None, description="一致预期变化描述")
-    institutional_forecasts: Optional[str] = Field(default=None, description="具体机构预测描述")
-    valuation_analysis: ValuationAnalysis = Field(description="估值分析")
+    """投资策略（相关性分析模型，第四部分）"""
+    indicator_extraction: List[StrategyIndicator] = Field(description="指标自动识别与抽取结果")
+    variable_table: List[VariableTableRow] = Field(description="输入变量表")
+    correlation_results: List[CorrelationResult] = Field(description="相关系数矩阵核心结果")
+    strategy_conclusion: StrategyConclusion = Field(description="核心结论与应用")
+    data_sufficiency: Optional[DataSufficiency] = Field(default=None, description="数据充分性说明")
+    clustering_model: Optional[ClusteringModel] = Field(default=None, description="聚类分析模型（客群-标的适配分组）")
+    notes: Optional[str] = Field(default=None, description="补充说明")
 
 
 # ==================== 完整报告模型 ====================
@@ -219,7 +278,7 @@ class AnnualReportAnalysis(BaseModel):
     financial_review: FinancialReview = Field(description="一、财务点评")
     business_guidance: BusinessGuidance = Field(description="二、业绩指引")
     business_highlights: BusinessHighlights = Field(description="三、业务亮点")
-    profit_forecast_and_valuation: ProfitForecastAndValuation = Field(description="四、盈利预测和估值")
+    profit_forecast_and_valuation: ProfitForecastAndValuation = Field(description="四、投资策略（相关性分析）")
     
     # 总结
     overall_summary: str = Field(description="五、总结 - 综合所有部分的总结")

@@ -1059,7 +1059,7 @@ const App = {
       })
     }
 
-    const handleQuickAnalysis = async ({ sectionName, companyName, year, question, typeName }) => {
+    const handleQuickAnalysis = async ({ sectionName, companyName, year, question, typeName, modelType }) => {
       if (!sectionName) {
         showMessage('error', '缺少分析类型，无法生成快捷分析')
         return
@@ -1084,7 +1084,8 @@ const App = {
           body: JSON.stringify({
             section_name: sectionName,
             company_name: companyName,
-            year
+            year,
+            model_type: modelType || undefined
           }),
           signal: controller.signal
         })
