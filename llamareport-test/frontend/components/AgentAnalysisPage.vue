@@ -246,19 +246,7 @@
                 <span class="data-icon">🎯</span>
                 <h3>业绩指引</h3>
               </div>
-              <div class="data-card-content">
-                <div v-if="isBusinessGuidanceObject(structuredData.businessGuidance)" class="summary-block">
-                  <div
-                    v-for="(section, idx) in buildBusinessGuidanceSections(structuredData.businessGuidance)"
-                    :key="idx"
-                    class="summary-item"
-                  >
-                    <span class="summary-label">{{ section.title }}</span>
-                    <div class="summary-text">{{ formatGuidanceSectionContent(section.content) }}</div>
-                  </div>
-                </div>
-                <div v-else v-html="parseMarkdown(structuredData.businessGuidance)"></div>
-              </div>
+              <div class="data-card-content" v-html="parseMarkdown(structuredData.businessGuidance)"></div>
             </div>
 
             <!-- 杜邦分析 -->
@@ -699,6 +687,46 @@ export default {
         this.visualizations.push(card)
       })
     },
+    async appendBusinessGuidanceTextVisualizations(answerText, question) {
+      if (!answerText || typeof answerText !== 'string') return
+      if (this.visualizations.some(viz => viz.source === 'guidance_text_viz')) return
+      try {
+        const response = await fetch('/agent/visualize-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: question || '业绩指引分析',
+            answer: answerText,
+            max_views: 3
+          })
+        })
+        if (!response.ok) {
+          console.warn('⚠️ [AgentAnalysisPage] 业绩指引文本可视化请求失败:', response.status)
+          return
+        }
+        const textViz = await response.json()
+        if (textViz && Array.isArray(textViz.visualizations)) {
+          textViz.visualizations.forEach((viz, idx) => {
+            if (!viz || !viz.has_visualization) return
+            this.visualizations.push({
+              id: `${Date.now().toString()}-guidance-text-viz-${idx}`,
+              question: viz.display_title || viz.query || question || '业绩指引分析可视化',
+              source: 'guidance_text_viz',
+              data: viz
+            })
+          })
+        } else if (textViz && textViz.has_visualization) {
+          this.visualizations.push({
+            id: `${Date.now().toString()}-guidance-text-viz`,
+            question: textViz.display_title || textViz.query || question || '业绩指引分析可视化',
+            source: 'guidance_text_viz',
+            data: textViz
+          })
+        }
+      } catch (error) {
+        console.warn('⚠️ [AgentAnalysisPage] 业绩指引文本可视化请求异常:', error)
+      }
+    },
     appendBusinessHighlightsTables(toolOutput) {
       if (!toolOutput || typeof toolOutput !== 'object') return
       const segmentTables = Array.isArray(toolOutput.segment_tables) ? toolOutput.segment_tables : []
@@ -1077,6 +1105,85 @@ export default {
 
       return sections.join('\n\n')
     },
+    formatBusinessGuidanceReport(payload) {
+      if (!payload || typeof payload !== 'object') return ''
+      
+      const guidancePeriod = payload.guidance_period || payload.guidancePeriod || ''
+      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
+      const keyMetrics = Array.isArray(payload.key_metrics || payload.keyMetrics)
+        ? (payload.key_metrics || payload.keyMetrics)
+        : []
+      const businessGuidance = Array.isArray(payload.business_specific_guidance || payload.businessSpecificGuidance)
+        ? (payload.business_specific_guidance || payload.businessSpecificGuidance)
+        : []
+      const riskWarnings = Array.isArray(payload.risk_warnings || payload.riskWarnings)
+        ? (payload.risk_warnings || payload.riskWarnings)
+        : []
+      
+      // 提取额外的指标数据
+      const parentProfit = payload.parent_net_profit_range || payload.parentNetProfitRange
+      const parentProfitGrowth = payload.parent_net_profit_growth_range || payload.parentNetProfitGrowthRange
+      const nonRecurringProfit = payload.non_recurring_profit_range || payload.nonRecurringProfitRange
+      const epsRange = payload.eps_range || payload.epsRange
+      const revenueRange = payload.revenue_range || payload.revenueRange
+      
+      const sections = []
+      
+      // 一、经营目标方向
+      if (guidancePeriod || expectedPerformance) {
+        const lines = ['### 一、经营目标方向']
+        if (guidancePeriod) {
+          lines.push(`**指引期间**：${guidancePeriod}`)
+        }
+        if (expectedPerformance) {
+          lines.push(`\n${expectedPerformance}`)
+        }
+        sections.push(lines.join('\n'))
+      }
+      
+      // 二、核心指标锚点
+      const metricItems = []
+      if (parentProfit) metricItems.push(`归母净利润：${parentProfit}`)
+      if (parentProfitGrowth) metricItems.push(`归母净利润增长率：${parentProfitGrowth}`)
+      if (nonRecurringProfit) metricItems.push(`扣非净利润：${nonRecurringProfit}`)
+      if (epsRange) metricItems.push(`基本每股收益：${epsRange}`)
+      if (revenueRange) metricItems.push(`营业收入：${revenueRange}`)
+      
+      const allMetrics = metricItems.length > 0 ? metricItems : keyMetrics
+      if (allMetrics.length > 0) {
+        const lines = ['### 二、核心指标锚点']
+        allMetrics.forEach(metric => {
+          if (metric) {
+            lines.push(`- ${metric}`)
+          }
+        })
+        sections.push(lines.join('\n'))
+      }
+      
+      // 三、关键执行路径
+      if (businessGuidance.length > 0) {
+        const lines = ['### 三、关键执行路径']
+        businessGuidance.forEach(guidance => {
+          if (guidance) {
+            lines.push(`- ${guidance}`)
+          }
+        })
+        sections.push(lines.join('\n'))
+      }
+      
+      // 四、不确定性与边界
+      if (riskWarnings.length > 0) {
+        const lines = ['### 四、不确定性与边界']
+        riskWarnings.forEach(risk => {
+          if (risk) {
+            lines.push(`- ${risk}`)
+          }
+        })
+        sections.push(lines.join('\n'))
+      }
+      
+      return sections.join('\n\n')
+    },
     async handleSubmit() {
       if (!this.inputText.trim() || this.loading) return
       
@@ -1266,13 +1373,13 @@ export default {
                 console.log('✅ [AgentAnalysisPage] 设置业务亮点数据')
               } else if (toolName === 'generate_business_guidance' && toolOutput) {
                 if (this.isBusinessGuidanceObject(toolOutput)) {
-                  this.structuredData.businessGuidance = toolOutput
-                  this.appendBusinessGuidanceVisualTables(toolOutput)
+                  const formattedReport = this.formatBusinessGuidanceReport(toolOutput)
+                  this.structuredData.businessGuidance = formattedReport || toolOutput
                 } else {
                   const textContent = extractTextFromToolOutput(toolOutput)
                   this.structuredData.businessGuidance = textContent || toolOutput
                 }
-                console.log('✅ [AgentAnalysisPage] 设置业绩指引数据', this.isBusinessGuidanceObject(this.structuredData.businessGuidance) ? '(对象)' : '(文本)')
+                console.log('✅ [AgentAnalysisPage] 设置业绩指引数据')
               } else if (toolName === 'generate_visualization' && toolOutput && toolOutput.has_visualization) {
                 this.visualizations.push({
                   id: Date.now().toString() + '-' + this.visualizations.length,
@@ -1308,9 +1415,13 @@ export default {
               this.structuredData.businessHighlights = formattedReport || summary || structured.business_highlights
             }
             if (structured.business_guidance) {
-              this.structuredData.businessGuidance = structured.business_guidance
-              this.appendBusinessGuidanceVisualTables(structured.business_guidance)
+              const formattedReport = this.formatBusinessGuidanceReport(structured.business_guidance)
+              this.structuredData.businessGuidance = formattedReport || structured.business_guidance
             }
+          }
+
+          if (this.structuredData.businessGuidance && this.answer) {
+            await this.appendBusinessGuidanceTextVisualizations(this.answer, question)
           }
           
           // 先设置loading为false，确保UI能切换到结果视图

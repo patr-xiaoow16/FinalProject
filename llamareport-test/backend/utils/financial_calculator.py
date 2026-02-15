@@ -398,6 +398,15 @@ class DupontAnalyzer:
         weaknesses: List[str] = []
         recommendations: List[str] = []
 
+        def fmt_percent(value: Optional[float]) -> str:
+            return f"{value:.2f}%" if value is not None else "—"
+
+        def fmt_times(value: Optional[float]) -> str:
+            return f"{value:.2f}倍" if value is not None else "—"
+
+        def fmt_amount(value: Optional[float]) -> str:
+            return self._format_amount(value)
+
         def dedupe(items: List[str]) -> List[str]:
             seen = set()
             result = []
@@ -412,6 +421,94 @@ class DupontAnalyzer:
             if numerator is None or denominator in (None, 0):
                 return None
             return numerator / denominator
+
+        # 基础指标概览（丰富内容，明确关键数值）
+        if parsed.roe is not None or parsed.roa is not None or parsed.equity_multiplier is not None:
+            insights.append(
+                f"核心指标显示：ROE为{fmt_percent(parsed.roe)}，ROA为{fmt_percent(parsed.roa)}，"
+                f"权益乘数为{fmt_times(parsed.equity_multiplier)}。"
+            )
+
+        if parsed.net_profit_margin is not None or parsed.asset_turnover is not None:
+            insights.append(
+                f"ROA由盈利能力与周转效率共同决定：净利率{fmt_percent(parsed.net_profit_margin)}，"
+                f"资产周转率{fmt_times(parsed.asset_turnover)}。"
+            )
+
+        if parsed.net_profit_margin is not None:
+            if parsed.net_profit_margin >= 15:
+                insights.append(
+                    f"净利率处于高位（{fmt_percent(parsed.net_profit_margin)}），盈利质量较强，对ROA形成支撑。"
+                )
+            elif parsed.net_profit_margin <= 6:
+                insights.append(
+                    f"净利率偏低（{fmt_percent(parsed.net_profit_margin)}），盈利质量承压，ROA改善需依赖成本与结构优化。"
+                )
+
+        if parsed.asset_turnover is not None:
+            if parsed.asset_turnover >= 1:
+                insights.append(
+                    f"资产周转率保持在{fmt_times(parsed.asset_turnover)}，周转效率较好，有助于释放资产收益。"
+                )
+            elif parsed.asset_turnover <= 0.6:
+                insights.append(
+                    f"资产周转率偏低（{fmt_times(parsed.asset_turnover)}），周转效率是ROA改善的关键约束。"
+                )
+
+        if parsed.equity_multiplier is not None:
+            if parsed.equity_multiplier >= 3.5:
+                insights.append(
+                    f"权益乘数为{fmt_times(parsed.equity_multiplier)}，杠杆水平偏高，ROE对杠杆依赖度较大。"
+                )
+            elif parsed.equity_multiplier <= 1.8:
+                insights.append(
+                    f"权益乘数为{fmt_times(parsed.equity_multiplier)}，杠杆水平偏低，ROE更多依靠盈利与效率驱动。"
+                )
+
+        if parsed.net_profit is not None and parsed.revenue is not None:
+            insights.append(
+                f"盈利体量方面，净利润为{fmt_amount(parsed.net_profit)}，营业收入为{fmt_amount(parsed.revenue)}，"
+                "利润规模与收入体量共同构成盈利基础。"
+            )
+
+        if parsed.total_assets is not None and parsed.equity is not None:
+            insights.append(
+                f"资产与权益规模为{fmt_amount(parsed.total_assets)}与{fmt_amount(parsed.equity)}，"
+                f"对应权益乘数{fmt_times(parsed.equity_multiplier)}，反映杠杆结构。"
+            )
+
+        if parsed.total_liabilities is not None and parsed.total_assets is not None:
+            liability_ratio = safe_ratio(parsed.total_liabilities, parsed.total_assets)
+            if liability_ratio is not None:
+                insights.append(
+                    f"资产负债率约为{fmt_percent(liability_ratio * 100)}，"
+                    "体现资产结构与负债压力的综合水平。"
+                )
+                if liability_ratio >= 0.7:
+                    insights.append("资产负债率处于偏高区间，杠杆弹性有限，需关注资本安全边际。")
+                elif liability_ratio <= 0.4:
+                    insights.append("资产负债率处于较低区间，资本结构更稳健，风险承受能力较强。")
+
+        if parsed.current_assets is not None and parsed.non_current_assets is not None:
+            total_assets = parsed.current_assets + parsed.non_current_assets
+            if total_assets > 0:
+                current_ratio = parsed.current_assets / total_assets
+                insights.append(
+                    f"流动资产占比约{fmt_percent(current_ratio * 100)}，"
+                    "流动性结构影响周转效率与风险缓冲。"
+                )
+                if current_ratio >= 0.7:
+                    insights.append("资产结构偏流动化，流动性优势较明显，但收益率可能受限。")
+                elif current_ratio <= 0.3:
+                    insights.append("资产结构偏非流动化，周转效率可能偏弱，对ROA形成拖累。")
+
+        if parsed.operating_profit is not None and parsed.net_profit is not None:
+            op_ratio = safe_ratio(parsed.operating_profit, parsed.net_profit)
+            if op_ratio is not None:
+                insights.append(
+                    f"营业利润与净利润的匹配度约为{fmt_percent(op_ratio * 100)}，"
+                    "反映主营盈利对净利润的贡献程度。"
+                )
 
         if parsed.roe is not None and parsed.roa is not None and parsed.equity_multiplier is not None:
             insights.append("ROE由资产净利率与权益乘数共同驱动。")

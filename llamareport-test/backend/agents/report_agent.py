@@ -498,6 +498,25 @@ class ReportAgent:
             # 使用query管线，确保可视化与精简输出一致
             result = await self.query(query)
 
+            # 业绩指引：如果没有可视化，则基于分析文本补充可视化（图文结合）
+            if section_name == "business_guidance" and not result.get("visualization"):
+                answer_text = result.get("answer") or result.get("content") or ""
+                if isinstance(answer_text, str) and answer_text.strip():
+                    try:
+                        import asyncio
+                        visualization = await asyncio.wait_for(
+                            generate_visualization_for_query(
+                                query=query,
+                                answer=answer_text
+                            ),
+                            timeout=25.0
+                        )
+                        if isinstance(visualization, dict) and visualization.get("has_visualization"):
+                            result["visualization"] = visualization
+                            logger.info("✅ 业绩指引已补充可视化")
+                    except Exception as viz_error:
+                        logger.warning(f"⚠️ 业绩指引可视化补充失败: {viz_error}")
+
             # 业务亮点：如果没有可视化，则基于分析文本补充可视化（图文结合）
             if section_name == "business_highlights" and not result.get("visualization"):
                 answer_text = result.get("answer") or result.get("content") or ""

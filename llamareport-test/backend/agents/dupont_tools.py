@@ -73,6 +73,21 @@ async def generate_dupont_analysis(
             analysis_by_year = _build_analysis_by_year(structured_metrics, company_name)
             if analysis_by_year:
                 result_dict["analysis_by_year"] = analysis_by_year
+
+        # 使用大模型生成更丰富的洞察（若失败则保留规则洞察）
+        try:
+            llm_insights = await _generate_dupont_llm_insights(
+                company_name=company_name,
+                year=year,
+                dupont_result=result_dict
+            )
+            if llm_insights:
+                result_dict["insights"] = llm_insights.get("insights", result_dict.get("insights", []))
+                result_dict["strengths"] = llm_insights.get("strengths", result_dict.get("strengths", []))
+                result_dict["weaknesses"] = llm_insights.get("weaknesses", result_dict.get("weaknesses", []))
+                result_dict["recommendations"] = llm_insights.get("recommendations", result_dict.get("recommendations", []))
+        except Exception as llm_error:
+            logger.warning(f"⚠️ 杜邦分析LLM洞察生成失败，回退规则洞察: {llm_error}")
         
         logger.info(f"杜邦分析生成成功: ROE={dupont_result.level1.roe.formatted_value}")
         
@@ -83,6 +98,95 @@ async def generate_dupont_analysis(
         import traceback
         logger.error(f"详细错误: {traceback.format_exc()}")
         raise
+
+
+async def _generate_dupont_llm_insights(
+    company_name: str,
+    year: str,
+    dupont_result: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """
+    使用大模型生成杜邦分析洞察（丰富版）。
+    仅基于已计算的杜邦指标输出，不得编造数值。
+    """
+    try:
+        from llama_index.core import Settings
+        from llama_index.core.llms import ChatMessage
+    except Exception as import_error:
+        logger.warning(f"⚠️ 无法加载LLM依赖，跳过杜邦洞察生成: {import_error}")
+        return None
+
+    def _get_metric_value(node: Optional[Dict[str, Any]]) -> str:
+        if not node or not isinstance(node, dict):
+            return "—"
+        return node.get("formatted_value") or node.get("value") or "—"
+
+    level1 = dupont_result.get("level1", {}) if isinstance(dupont_result, dict) else {}
+    level2 = dupont_result.get("level2", {}) if isinstance(dupont_result, dict) else {}
+    level3 = dupont_result.get("level3", {}) if isinstance(dupont_result, dict) else {}
+
+    metrics_payload = {
+        "roe": _get_metric_value(level1.get("roe")),
+        "roa": _get_metric_value(level1.get("roa")),
+        "equity_multiplier": _get_metric_value(level1.get("equity_multiplier")),
+        "net_profit_margin": _get_metric_value(level2.get("net_profit_margin")),
+        "asset_turnover": _get_metric_value(level2.get("asset_turnover")),
+        "total_assets": _get_metric_value(level2.get("total_assets")),
+        "shareholders_equity": _get_metric_value(level2.get("shareholders_equity")),
+        "net_income": _get_metric_value(level3.get("net_income")),
+        "revenue": _get_metric_value(level3.get("revenue")),
+        "current_assets": _get_metric_value(level3.get("current_assets")),
+        "non_current_assets": _get_metric_value(level3.get("non_current_assets")),
+        "operating_profit": _get_metric_value(level3.get("operating_profit")),
+        "total_liabilities": _get_metric_value(level3.get("total_liabilities"))
+    }
+
+    prompt = f"""
+你是资深财务分析师，请基于以下杜邦分析指标，为{company_name}{year}年生成“内容充分、结构清晰”的洞察。
+
+## 杜邦指标（只能使用这些数值，不得编造）
+{metrics_payload}
+
+## 输出要求
+- 输出必须是JSON格式，字段如下：
+{{
+  "insights": ["综合洞察，至少5条，引用数值"],
+  "strengths": ["优势要点，至少2条，引用数值"],
+  "weaknesses": ["劣势要点，至少2条，引用数值"],
+  "recommendations": ["改进建议，至少2条，结合数值"]
+}}
+- 必须引用至少6个具体数值（例如：ROE、ROA、净利率、周转率、资产/权益规模等）
+- 洞察应覆盖：盈利能力、周转效率、杠杆结构、资产负债结构、规模体量
+- 不限制字数，尽量充分展开
+- 只输出JSON，不要有任何其他文本
+"""
+
+    llm = Settings.llm
+    response = await llm.achat([
+        ChatMessage(role="system", content="你是专业财务分析师，必须严格输出JSON。"),
+        ChatMessage(role="user", content=prompt)
+    ])
+
+    content = ""
+    if hasattr(response, "message") and hasattr(response.message, "content"):
+        content = response.message.content
+    else:
+        content = str(response)
+
+    import json
+    import re
+    json_match = re.search(r"\{[\s\S]*\}", content)
+    if not json_match:
+        return None
+    parsed = json.loads(json_match.group(0))
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "insights": parsed.get("insights", []),
+        "strengths": parsed.get("strengths", []),
+        "weaknesses": parsed.get("weaknesses", []),
+        "recommendations": parsed.get("recommendations", [])
+    }
 
 
 async def extract_financial_data_for_dupont(

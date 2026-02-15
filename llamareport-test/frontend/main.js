@@ -464,6 +464,24 @@ const App = {
 
     const stripHtmlTags = (text = '') => String(text).replace(/<[^>]*>/g, '')
 
+    const escapeMarkdownCell = (value) => String(value ?? '—')
+      .replace(/\r?\n/g, '<br>')
+      .replace(/\|/g, '\\|')
+
+    const toMarkdownTable = (headers = [], rows = [], maxRows = 6) => {
+      if (!Array.isArray(headers) || !Array.isArray(rows) || headers.length === 0) return ''
+      const normalizedRows = rows
+        .filter(row => Array.isArray(row) && row.some(cell => String(cell ?? '').trim()))
+        .slice(0, maxRows)
+        .map(row => row.slice(0, headers.length))
+      if (normalizedRows.length === 0) return ''
+      const headerLine = `| ${headers.map(escapeMarkdownCell).join(' | ')} |`
+      const divider = `| ${headers.map(() => '---').join(' | ')} |`
+      const bodyLines = normalizedRows
+        .map(row => `| ${row.map(escapeMarkdownCell).join(' | ')} |`)
+      return [headerLine, divider, ...bodyLines].join('\n')
+    }
+
     const normalizeInsightText = (text = '') => stripHtmlTags(text)
       .replace(/\s+/g, '')
       .replace(/[：:、，,.;。；]/g, '')
@@ -479,6 +497,204 @@ const App = {
       const formatted = formatSummaryList(trimmed)
       const title = '<div class="summary-title">补充说明</div>'
       return `${base || ''}${base ? '<br>' : ''}${title}${formatted}`
+    }
+
+    const buildFinancialReviewMarkdown = ({
+      companyName,
+      year,
+      payload,
+      rawContent,
+      toolSummary
+    }) => {
+      const titleCompany = companyName || '公司'
+      const titleYear = year ? `${year}年` : ''
+      const title = `${titleCompany}${titleYear}财务点评分析`
+      const summarySource = payload?.summary || toolSummary || {}
+      const getSummaryText = (value) => {
+        if (!value) return ''
+        if (typeof value === 'string') return value.trim()
+        return ''
+      }
+      const summary = {
+        balance_sheet: getSummaryText(summarySource.balance_sheet || summarySource.balanceSheet),
+        income_statement: getSummaryText(summarySource.income_statement || summarySource.incomeStatement),
+        cash_flow: getSummaryText(summarySource.cash_flow || summarySource.cashFlow),
+        overall: getSummaryText(summarySource.overall)
+      }
+      const tables = payload?.visualization_tables || {}
+      const tableList = [
+        tables.balance_sheet_assets,
+        tables.balance_sheet_liabilities,
+        tables.income_statement_revenue,
+        tables.income_statement_expense,
+        tables.cash_flow
+      ].filter(table => table && isMeaningfulTable(table))
+
+      const toMetricBullets = (table, maxRows = 4) => {
+        if (!table) return ''
+        const headers = Array.isArray(table.headers) ? table.headers : []
+        const rows = Array.isArray(table.rows) ? table.rows : []
+        const pickedRows = rows.filter(row => Array.isArray(row)).slice(0, maxRows)
+        if (!pickedRows.length || headers.length < 2) return ''
+        return pickedRows.map((row) => {
+          const metric = row[0] || '指标'
+          const parts = []
+          for (let i = 1; i < Math.min(row.length, headers.length); i += 1) {
+            const label = headers[i]
+            const value = row[i]
+            if (value !== undefined && value !== null && String(value).trim() !== '') {
+              parts.push(`${label}：${value}`)
+            }
+          }
+          const detail = parts.length ? `（${parts.join('；')}）` : ''
+          return `- ${metric}${detail}`
+        }).join('\n')
+      }
+
+      const toBulletParagraphs = (text = '') => {
+        const cleaned = String(text || '').trim()
+        if (!cleaned) return ''
+        if (/^\s*[-*]\s+/m.test(cleaned)) return cleaned
+        const parts = cleaned
+          .split(/[。；]\s*/g)
+          .map(item => item.trim())
+          .filter(Boolean)
+        if (parts.length <= 1) return cleaned
+        return parts.map(item => `- ${item}`).join('\n')
+      }
+
+      const sectionBlocks = []
+      if (summary.balance_sheet) {
+        sectionBlocks.push(`## **资产负债表**\n${toBulletParagraphs(summary.balance_sheet)}`)
+      }
+      if (summary.income_statement) {
+        sectionBlocks.push(`## **利润表**\n${toBulletParagraphs(summary.income_statement)}`)
+      }
+      if (summary.cash_flow) {
+        sectionBlocks.push(`## **现金流量表**\n${toBulletParagraphs(summary.cash_flow)}`)
+      }
+      if (summary.overall) {
+        sectionBlocks.push(`## **综合判断**\n${toBulletParagraphs(summary.overall)}`)
+      }
+
+      const metricsBlocks = tableList.map((table) => {
+        const titleText = sanitizeCardTitle(table.title || '关键指标')
+        const bullets = toMetricBullets(table, 4)
+        if (!bullets) return ''
+        return `#### ${titleText}\n${bullets}`
+      }).filter(Boolean)
+
+      const supplement = rawContent && typeof rawContent === 'string'
+        ? rawContent.trim()
+        : ''
+
+      const parts = [`## ${title}`]
+      if (sectionBlocks.length) parts.push(sectionBlocks.join('\n\n'))
+      if (metricsBlocks.length) parts.push(`## **关键指标速览**\n${metricsBlocks.join('\n\n')}`)
+      if (supplement && !supplement.startsWith('{') && !supplement.startsWith('[')) {
+        parts.push(`${supplement}`)
+      }
+      return parts.join('\n\n')
+    }
+
+    const buildBusinessGuidanceMarkdown = ({
+      companyName,
+      year,
+      payload
+    }) => {
+      if (!payload || typeof payload !== 'object') return ''
+      const titleCompany = companyName || '公司'
+      const titleYear = year ? `${year}年` : ''
+      const title = `${titleCompany}${titleYear}业绩指引分析`
+      const guidancePeriod = payload.guidance_period || payload.guidancePeriod || `${year || ''}年度`
+      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
+      const metricHighlights = []
+      const parentProfit = payload.parent_net_profit_range || payload.parentNetProfitRange
+      const parentProfitGrowth = payload.parent_net_profit_growth_range || payload.parentNetProfitGrowthRange
+      const nonRecurringProfit = payload.non_recurring_profit_range || payload.nonRecurringProfitRange
+      const epsRange = payload.eps_range || payload.epsRange
+      const revenueRange = payload.revenue_range || payload.revenueRange
+      if (parentProfit) metricHighlights.push(`归母净利润：${parentProfit}`)
+      if (parentProfitGrowth) metricHighlights.push(`归母净利润增长率：${parentProfitGrowth}`)
+      if (nonRecurringProfit) metricHighlights.push(`扣非净利润：${nonRecurringProfit}`)
+      if (epsRange) metricHighlights.push(`基本每股收益：${epsRange}`)
+      if (revenueRange) metricHighlights.push(`营业收入：${revenueRange}`)
+
+      const keyMetrics = Array.isArray(payload.key_metrics || payload.keyMetrics)
+        ? (payload.key_metrics || payload.keyMetrics)
+        : []
+      const businessGuidance = Array.isArray(payload.business_specific_guidance || payload.businessSpecificGuidance)
+        ? (payload.business_specific_guidance || payload.businessSpecificGuidance)
+        : []
+      const riskWarnings = Array.isArray(payload.risk_warnings || payload.riskWarnings)
+        ? (payload.risk_warnings || payload.riskWarnings)
+        : []
+
+      const listBlock = (items = [], fallback = '未明确') => {
+        const list = items.filter(Boolean)
+        if (!list.length) return `- ${fallback}`
+        return list.map(item => `- ${item}`).join('\n')
+      }
+
+      const parts = [`## **${title}**`]
+      parts.push(`**指引期间**：${guidancePeriod || '未明确'}`)
+      parts.push(`## **一、经营目标方向**\n${expectedPerformance ? expectedPerformance : '未明确'}`)
+      parts.push(`## **二、核心指标锚点**\n${listBlock(metricHighlights.length ? metricHighlights : keyMetrics)}`)
+      parts.push(`## **三、关键执行路径**\n${listBlock(businessGuidance)}`)
+      parts.push(`## **四、不确定性与边界**\n${listBlock(riskWarnings)}`)
+      return parts.join('\n\n')
+    }
+
+    const buildDupontMarkdown = ({
+      companyName,
+      year,
+      analysis
+    }) => {
+      if (!analysis || typeof analysis !== 'object') return ''
+      const titleCompany = companyName || '公司'
+      const titleYear = year ? `${year}年` : ''
+      const title = `${titleCompany}${titleYear}杜邦分析`
+      const level1 = analysis.level1 || {}
+      const level2 = analysis.level2 || {}
+      const level3 = analysis.level3 || {}
+      const metricValue = (source, key) => (
+        source?.[key]?.formatted_value
+        || source?.[key]?.value
+        || source?.[key]
+        || '—'
+      )
+      const roe = metricValue(level1, 'roe')
+      const roa = metricValue(level1, 'roa')
+      const equityMultiplier = metricValue(level1, 'equity_multiplier')
+      const netProfitMargin = metricValue(level2, 'net_profit_margin')
+      const assetTurnover = metricValue(level2, 'asset_turnover')
+      const netIncome = metricValue(level3, 'net_income')
+      const revenue = metricValue(level3, 'revenue')
+      const totalAssets = metricValue(level2, 'total_assets')
+      const shareholdersEquity = metricValue(level2, 'shareholders_equity')
+
+      const listBlock = (items = []) => {
+        const list = Array.isArray(items) ? items.filter(Boolean) : []
+        if (!list.length) return ''
+        return list.map(item => `- ${item}`).join('\n')
+      }
+
+      const parts = [`## **${title}**`]
+      parts.push(`**关键指标**：ROE ${roe}；ROA ${roa}；权益乘数 ${equityMultiplier}；净利率 ${netProfitMargin}；资产周转率 ${assetTurnover}；净利润 ${netIncome}；营业收入 ${revenue}；总资产 ${totalAssets}；股东权益 ${shareholdersEquity}`)
+
+      const insightsBlock = listBlock(analysis.insights)
+      if (insightsBlock) parts.push(`## **一、分析洞察**\n${insightsBlock}`)
+
+      const strengths = Array.isArray(analysis.strengths) ? analysis.strengths : []
+      const weaknesses = Array.isArray(analysis.weaknesses) ? analysis.weaknesses : []
+      const mergedSW = [...strengths, ...weaknesses].filter(Boolean)
+      const mergedBlock = listBlock(mergedSW)
+      if (mergedBlock) parts.push(`## **二、优势劣势**\n${mergedBlock}`)
+
+      const recommendationsBlock = listBlock(analysis.recommendations)
+      if (recommendationsBlock) parts.push(`## **三、改进建议**\n${recommendationsBlock}`)
+
+      return parts.join('\n\n')
     }
 
     const extractFinancialReviewPayload = (result) => {
@@ -1181,22 +1397,78 @@ const App = {
               })
             }
 
-            answerText = appendFinancialReviewSupplement(answerText, rawContent)
+            const fullMarkdown = buildFinancialReviewMarkdown({
+              companyName,
+              year,
+              payload: financialReview,
+              rawContent,
+              toolSummary
+            })
+            if (fullMarkdown) {
+              answerText = fullMarkdown
+            } else {
+              answerText = appendFinancialReviewSupplement(answerText, rawContent)
+            }
           }
 
           if (sectionName === 'business_guidance') {
             const payload = extractBusinessGuidancePayload(result)
             if (payload) {
-              const formatted = formatBusinessGuidanceSummary(payload)
-              if (formatted) {
-                answerText = formatted
-              }
-              const specCards = buildGuidanceVisualizationCards(payload, question)
-              specCards.forEach(card => {
-                if (!visualizationCards.value.some(existing => existing.source === card.source)) {
-                  visualizationCards.value.push(card)
-                }
+              const fullMarkdown = buildBusinessGuidanceMarkdown({
+                companyName,
+                year,
+                payload
               })
+              if (fullMarkdown) {
+                answerText = fullMarkdown
+              } else {
+                const formatted = formatBusinessGuidanceSummary(payload)
+                if (formatted) {
+                  answerText = formatted
+                }
+              }
+              if (answerText && !visualizationCards.value.some(card => card.source === 'guidance_text_viz')) {
+                try {
+                  const vizResponse = await fetch('/agent/visualize-text', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      query: question || '业绩指引分析',
+                      answer: answerText,
+                      max_views: 3
+                    })
+                  })
+                  if (vizResponse.ok) {
+                    const textViz = await vizResponse.json()
+                    if (textViz && textViz.visualizations && Array.isArray(textViz.visualizations)) {
+                      textViz.visualizations.forEach((viz, idx) => {
+                        if (!viz || !viz.has_visualization) return
+                        visualizationCards.value.push({
+                          id: `${Date.now().toString()}-guidance-text-viz-${idx}`,
+                          question: sanitizeCardTitle(viz.display_title || viz.query || question || '业绩指引分析可视化'),
+                          timestamp: new Date(),
+                          data: viz,
+                          type: 'chart',
+                          source: 'guidance_text_viz'
+                        })
+                      })
+                    } else if (textViz && textViz.has_visualization) {
+                      visualizationCards.value.push({
+                        id: `${Date.now().toString()}-guidance-text-viz`,
+                        question: sanitizeCardTitle(textViz.display_title || textViz.query || question || '业绩指引分析可视化'),
+                        timestamp: new Date(),
+                        data: textViz,
+                        type: 'chart',
+                        source: 'guidance_text_viz'
+                      })
+                    }
+                  } else {
+                    console.warn('⚠️ 业绩指引文本可视化请求失败:', vizResponse.status)
+                  }
+                } catch (error) {
+                  console.warn('⚠️ 业绩指引文本可视化请求异常:', error)
+                }
+              }
             }
           }
 
@@ -1524,43 +1796,19 @@ const App = {
           const roa = level1.roa?.formatted_value || 'N/A'
           const equityMultiplier = level1.equity_multiplier?.formatted_value || 'N/A'
           
-          let content = `✅ 杜邦分析生成成功！\n\n`
-          content += `**公司**: ${result.company_name || '未知'}\n`
-          content += `**年份**: ${result.year || '未知'}\n\n`
-          content += `**核心指标**:\n`
-          content += `- 净资产收益率(ROE): ${roe}\n`
-          content += `- 资产净利率(ROA): ${roa}\n`
-          content += `- 权益乘数: ${equityMultiplier}\n\n`
-          
-          if (analysis.insights && analysis.insights.length > 0) {
-            content += `**分析洞察**:\n`
-            analysis.insights.forEach(insight => {
-              content += `- ${insight}\n`
-            })
-            content += `\n`
-          }
-          
-          if (analysis.strengths && analysis.strengths.length > 0) {
-            content += `**优势**:\n`
-            analysis.strengths.forEach(strength => {
-              content += `- ✅ ${strength}\n`
-            })
-            content += `\n`
-          }
-          
-          if (analysis.weaknesses && analysis.weaknesses.length > 0) {
-            content += `**劣势**:\n`
-            analysis.weaknesses.forEach(weakness => {
-              content += `- ⚠️ ${weakness}\n`
-            })
-            content += `\n`
-          }
-          
-          if (analysis.recommendations && analysis.recommendations.length > 0) {
-            content += `**改进建议**:\n`
-            analysis.recommendations.forEach(rec => {
-              content += `- 💡 ${rec}\n`
-            })
+          let content = buildDupontMarkdown({
+            companyName: result.company_name,
+            year: result.year,
+            analysis
+          })
+          if (!content) {
+            content = `✅ 杜邦分析生成成功！\n\n`
+            content += `**公司**: ${result.company_name || '未知'}\n`
+            content += `**年份**: ${result.year || '未知'}\n\n`
+            content += `**核心指标**:\n`
+            content += `- 净资产收益率(ROE): ${roe}\n`
+            content += `- 资产净利率(ROA): ${roa}\n`
+            content += `- 权益乘数: ${equityMultiplier}\n\n`
           }
           
           chatMessages.value.push({ 

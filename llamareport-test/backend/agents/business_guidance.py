@@ -39,7 +39,7 @@ async def generate_business_guidance(
     try:
         logger.info(f"开始生成业绩指引: {company_name} {year}年")
         
-        # 检索业绩指引相关数据
+        # 检索业绩指引相关数据（多维度检索）
         query = f"{company_name} {year}年 业绩预告 业绩指引 下一年度预期 经营计划"
         guidance_data = query_engine.query(query)
 
@@ -49,6 +49,27 @@ async def generate_business_guidance(
             "营业收入 净利润 净息差 不良率 资本充足率 成本收入比"
         )
         key_metrics_data = query_engine.query(key_metrics_query)
+        
+        # 补充检索业务板块指引
+        business_segments_query = (
+            f"{company_name} {year}年 业务板块指引 零售业务 对公业务 资金同业业务 "
+            "业务发展计划 业务结构调整 业务转型"
+        )
+        business_segments_data = query_engine.query(business_segments_query)
+        
+        # 补充检索风险提示
+        risk_query = (
+            f"{company_name} {year}年 风险提示 不确定性 风险因素 经营风险 "
+            "市场风险 信用风险 流动性风险 操作风险"
+        )
+        risk_data = query_engine.query(risk_query)
+        
+        # 补充检索战略方向
+        strategy_query = (
+            f"{company_name} {year}年 发展战略 战略方向 战略目标 战略规划 "
+            "转型方向 业务转型 结构调整"
+        )
+        strategy_data = query_engine.query(strategy_query)
         
         # 使用 LLM 生成结构化的业绩指引
         llm = Settings.llm
@@ -122,10 +143,21 @@ async def generate_business_guidance(
 只输出JSON，不要输出任何解释或代码块。
 
 数据来源（年报原文节选）：
+
+### 基础业绩指引数据：
 {str(guidance_data)}
 
-补充的关键指标线索：
+### 关键指标线索：
 {str(key_metrics_data)}
+
+### 业务板块指引：
+{str(business_segments_data)}
+
+### 风险提示数据：
+{str(risk_data)}
+
+### 战略方向数据：
+{str(strategy_data)}
 
 输出JSON结构（必须严格遵守）：
 {{
@@ -140,16 +172,21 @@ async def generate_business_guidance(
     }}
   ],
   "risks": [
-    {{"risk": "风险名称", "impact": "影响对象", "probability": "高/中/低", "source": "来源描述"}}
+    {{"risk": "风险名称", "impact": "影响对象", "probability": "高/中/低", "source": "来源描述", "related_metrics": ["相关指标1", "相关指标2"]}}
   ],
   "execution_path": [
-    {{"action": "执行动作", "evidence": "指标或变化证据"}}
+    {{"action": "执行动作", "evidence": "指标或变化证据", "business_segment": "业务板块", "impact": "影响说明"}}
+  ],
+  "strategic_direction": [
+    {{"direction": "战略方向", "target": "目标指标", "current_value": "当前值", "target_value": "目标值"}}
   ]
 }}
 
 约束：
 - 只能使用给定文本中的可核验数据
+- 尽量提取更多数据，使数据集、风险、执行路径等数组尽可能丰富
 - 若缺失就填空数组，不要编造
+- 优先从多个数据源中提取相关信息
 """
 
         extracted_data = {}
@@ -176,32 +213,39 @@ async def generate_business_guidance(
 {{
   "operating_goal": {{
     "chart_type": "status_card",
-    "stage": "经营阶段/基调",
-    "priority": ["风险控制", "盈利稳定", "规模增长"]
+    "stage": "经营阶段/基调（如：转型期/进攻期/防守期）",
+    "priority": ["风险控制", "盈利稳定", "规模增长"],
+    "key_targets": [
+      {{"target": "目标名称", "value": "目标值", "unit": "单位"}}
+    ]
   }},
   "key_metrics": {{
     "chart_type": "status_bar",
     "items": [
-      {{"name": "指标名", "value": "数值", "trend": "up/down/flat", "note": "解读"}}
+      {{"name": "指标名", "value": "数值", "trend": "up/down/flat", "note": "解读", "category": "盈利能力/资产质量/成本控制/收入结构"}}
     ]
   }},
   "execution_path": {{
     "chart_type": "structure_change",
     "items": [
-      {{"action": "执行动作", "evidence": "指标证据"}}
+      {{"action": "执行动作", "evidence": "指标证据", "business_segment": "业务板块", "impact": "影响说明"}}
     ]
   }},
   "uncertainty": {{
     "chart_type": "risk_matrix",
     "items": [
-      {{"risk": "风险", "impact": "影响对象", "probability": "高/中/低"}}
+      {{"risk": "风险", "impact": "影响对象", "probability": "高/中/低", "related_metrics": ["相关指标"]}}
     ]
   }}
 }}
 
 约束：
+- 尽量生成丰富的可视化指令，每个板块的items数组应尽可能包含更多条目
 - 如果数据不足，对应items为空数组
 - 只使用提供的结构化数据，不得新增数据
+- key_metrics的items应包含≥5个指标
+- execution_path的items应包含≥5个执行路径
+- uncertainty的items应包含≥3个风险
 """
 
         visualization_spec = {}
@@ -236,12 +280,14 @@ async def generate_business_guidance(
   }},
   "key_metrics": {{
     "insights": [
-      {{"insight_type": "trend", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["指标名1", "指标名2"]}}
+      {{"insight_type": "trend", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["指标名1", "指标名2"]}},
+      {{"insight_type": "comparison", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["指标名3", "指标名4"]}}
     ]
   }},
   "execution_path": {{
     "insights": [
-      {{"insight_type": "comparison", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["执行动作1", "执行动作2"]}}
+      {{"insight_type": "comparison", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["执行动作1", "执行动作2"]}},
+      {{"insight_type": "trend", "description": "洞察描述", "key_findings": ["要点1", "要点2"], "related_items": ["执行动作3", "执行动作4"]}}
     ]
   }},
   "uncertainty": {{
@@ -252,7 +298,9 @@ async def generate_business_guidance(
 }}
 
 约束：
-- 每个板块最多2条洞察
+- 尽量生成丰富的洞察，每个板块的insights数组应尽可能包含更多条目
+- key_metrics板块应包含≥2条洞察
+- execution_path板块应包含≥2条洞察
 - 若无数据，对应insights为空数组
 - 只使用给定数据，不得编造
 - insight_type 只能是: trend, comparison, distribution, correlation, anomaly
@@ -277,7 +325,7 @@ async def generate_business_guidance(
             visualization_insights = {}
 
         prompt = f"""
-你是一名专业的金融分析师，负责在智能财务分析系统中生成“业绩指引洞察”与“可视化生成指令”。
+你是一名专业的金融分析师，负责在智能财务分析系统中生成"业绩指引洞察"与"可视化生成指令"。
 
 你的任务是：
 - 基于年报中可核验的数据与文本
@@ -292,10 +340,20 @@ async def generate_business_guidance(
 ## 数据来源
 以下数据来自{company_name} {year}年度年报中的业绩指引与经营计划部分：
 
+### 基础业绩指引数据：
 {str(guidance_data)}
 
-补充的关键指标线索（如有）：
+### 关键指标线索：
 {str(key_metrics_data)}
+
+### 业务板块指引：
+{str(business_segments_data)}
+
+### 风险提示数据：
+{str(risk_data)}
+
+### 战略方向数据：
+{str(strategy_data)}
 
 ## 任务说明
 请基于年报内容，围绕以下四个固定板块生成结果：
@@ -305,11 +363,44 @@ async def generate_business_guidance(
 4. 不确定性与边界
 
 ## 输出要求（必须严格遵守）
+
+### 一、经营目标方向 (expected_performance)
+- 必须是一段完整的结论型文字（200-400字），包含：
+  - 公司处于明确的业务结构转型期/进攻期/防守期中的哪一类
+  - 核心经营目标围绕的具体数值（≥3个），每个数值都要有具体说明
+  - 转型方向或战略基调的明确描述
+  - 业务结构变化趋势（如：从传统零售驱动转向对公与金融市场业务并重）
+
+### 二、核心指标锚点 (key_metrics)
+- 必须是一个列表，包含≥5条核心指标洞察
+- 每条洞察必须包含：
+  - 指标名称
+  - 具体数值（含单位）
+  - 同比/环比变化（如有）
+  - 简要解读（1-2句话说明该指标的意义）
+- 指标应涵盖：盈利能力、资产质量、成本控制、收入结构等维度
+
+### 三、关键执行路径 (business_specific_guidance)
+- 必须是一个列表，包含≥5条执行路径洞察
+- 每条洞察必须包含：
+  - 执行动作/业务方向
+  - 具体指标或变化证据（含数值）
+  - 对整体业绩的影响说明
+- 应按照业务板块分类（如：对公业务、零售业务、金融市场业务等）
+- 每条路径都要有明确的量化支撑
+
+### 四、不确定性与边界 (risk_warnings)
+- 必须是一个列表，包含≥3条风险洞察
+- 每条洞察必须包含：
+  - 风险名称
+  - 风险影响对象
+  - 相关指标变化（含具体数值）
+  - 风险概率评估（高/中/低）
+- 应涵盖：经营风险、市场风险、资产质量风险等
+
+### 通用要求：
 - 洞察面向用户阅读，只包含判断与结论，不复述原文
-- 洞察必须显式引用具体数值
-- 经营目标方向必须包含≥3个具体数值，并明确公司处于进攻/防守/转型中的哪一类
-- 核心指标锚点必须包含≥3个指标数据（含数值与口径/同比）
-- 不确定性与边界必须引用≥2个风险相关指标
+- 所有洞察必须显式引用具体数值，不得使用模糊表述
 - 不得输出任何示例表格或分析过程
 - 若无法形成可靠结论，必须明确输出：数据不足，无法生成洞察
 - 只使用给定数据与结构化数据清单，不得新增或编造数值
@@ -321,20 +412,35 @@ async def generate_business_guidance(
 以下结构仅用于组织内容，**不要输出JSON或代码块**：
 {{
   "guidance_period": "业绩预告期间，如'2025年度'",
-  "expected_performance": "经营目标方向的洞察（1段结论型文字）",
+  "expected_performance": "经营目标方向的洞察（200-400字完整段落，包含转型方向、核心目标数值、业务结构变化）",
   "parent_net_profit_range": "归母净利润范围（如有，否则null）",
   "parent_net_profit_growth_range": "归母净利润增长率范围（如有，否则null）",
   "non_recurring_profit_range": "扣非净利润范围（如有，否则null）",
   "eps_range": "基本每股收益范围（如有，否则null）",
   "revenue_range": "营业收入范围（如有，否则null）",
-  "key_metrics": ["核心指标锚点洞察（含数值/口径/同比）"],
-  "business_specific_guidance": ["关键执行路径洞察（结构变化/资源倾斜/风控动作）"],
-  "risk_warnings": ["不确定性与边界洞察（风险+指标变化）"]
+  "key_metrics": [
+    "核心指标锚点洞察1（指标名：数值，同比变化，解读）",
+    "核心指标锚点洞察2（指标名：数值，同比变化，解读）",
+    "...（至少5条）"
+  ],
+  "business_specific_guidance": [
+    "关键执行路径洞察1（业务板块：执行动作，指标证据，影响说明）",
+    "关键执行路径洞察2（业务板块：执行动作，指标证据，影响说明）",
+    "...（至少5条，按业务板块分类）"
+  ],
+  "risk_warnings": [
+    "不确定性与边界洞察1（风险名称，影响对象，指标变化，概率评估）",
+    "不确定性与边界洞察2（风险名称，影响对象，指标变化，概率评估）",
+    "...（至少3条）"
+  ]
 }}
 
 ### 重要提示：
 - 如果某些数据缺失，请如实说明，不要编造
-- “核心指标锚点”必须有具体数值支撑，优先从“补充的关键指标线索”中提炼
+- "核心指标锚点"必须有具体数值支撑，优先从"补充的关键指标线索"中提炼
+- "关键执行路径"应充分利用"业务板块指引"和"战略方向数据"
+- "不确定性与边界"应充分利用"风险提示数据"
+- 输出内容要像业务亮点一样丰富详细，每个板块都要有足够的深度和广度
 """
 
         # 使用结构化输出 - 添加异常处理和性能监控
