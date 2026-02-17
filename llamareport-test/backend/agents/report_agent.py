@@ -245,6 +245,11 @@ class ReportAgent:
             system_prompt = """
 你是一个资深的财务分析专家和年报分析师，拥有20年以上的行业经验。你的任务是生成高质量、专业、深入的年报分析报告。
 
+## 查询模式说明
+系统支持两种查询模式：
+1. **通用查询模式**（输入框输入）：用户通过输入框提问，优先使用 `annual_report_query` 工具进行基础查询，快速回答用户问题。只有在用户明确要求生成完整章节时，才调用生成工具。
+2. **章节生成模式**（按钮点击）：用户点击特定按钮（如"财务点评"、"业绩指引"等），直接调用对应的生成工具生成完整章节。
+
 ## 核心职责
 1. **深度理解用户需求**：准确理解用户的分析意图，识别关键分析维度
 2. **精准数据检索**：使用工具从年报中提取准确、完整的财务和业务数据
@@ -288,9 +293,11 @@ class ReportAgent:
 
 ### ✅ 正确的调用方式
 
-#### 简单问题（快速响应 - 5秒内完成）
-- 如果用户只是询问基本信息（如"公司名称"、"报告年份"、"基本财务数据"），**只调用** `annual_report_query` 工具
-- **不要**调用任何生成工具（generate_*），这会增加50-100秒的响应时间
+#### 通用查询模式（输入框输入 - 快速响应）
+- **优先使用** `annual_report_query` 工具进行基础查询，快速回答用户问题
+- 如果用户只是询问基本信息（如"公司名称"、"报告年份"、"基本财务数据"、"收入情况"等），**只调用** `annual_report_query` 工具
+- **不要**自动调用生成工具（generate_*），除非用户明确要求生成完整章节（如"生成财务点评"、"生成业绩指引"等）
+- 这样可以保持快速响应（5-10秒内完成），避免不必要的长时间等待
 
 #### 特定分析需求（按需调用 - 30-60秒）
 - **财务分析相关**：**只调用** `generate_financial_review`（工具内部会自动检索数据，无需额外调用）
@@ -555,12 +562,13 @@ class ReportAgent:
                 "section_name": section_name
             }
     
-    async def query(self, question: str) -> Dict[str, Any]:
+    async def query(self, question: str, query_type: str = "general") -> Dict[str, Any]:
         """
         通用查询接口
 
         Args:
             question: 用户问题
+            query_type: 查询类型，'general' (通用查询，输入框输入) 或 'section' (章节生成，按钮点击)
 
         Returns:
             查询结果（包含可视化数据）
@@ -568,7 +576,7 @@ class ReportAgent:
         import time
         query_start_time = time.time()
         try:
-            logger.info(f"[Agent Query] 🚀 Starting query: {question[:100]}...")
+            logger.info(f"[Agent Query] 🚀 Starting query (type: {query_type}): {question[:100]}...")
 
             # 导入必要的事件类型
             from llama_index.core.agent.workflow import (
@@ -578,8 +586,23 @@ class ReportAgent:
             )
             logger.info("[Agent Query] Successfully imported event types")
 
+            # 根据 query_type 调整查询策略
+            if query_type == "general":
+                # 通用查询：优先使用 annual_report_query，避免自动调用生成工具
+                # 在问题前添加提示，引导 Agent 使用通用查询工具
+                enhanced_question = (
+                    f"【通用查询模式】用户通过输入框提问，请优先使用 annual_report_query 工具进行基础查询。"
+                    f"只有在用户明确要求生成完整章节（如'生成财务点评'、'生成业绩指引'等）时，才调用对应的生成工具。"
+                    f"用户问题：{question}"
+                )
+                logger.info(f"[Agent Query] 使用通用查询模式，增强问题提示")
+            else:
+                # 章节生成模式：保持原有逻辑
+                enhanced_question = question
+                logger.info(f"[Agent Query] 使用章节生成模式")
+
             # 运行 Agent 并捕获事件
-            handler = self.agent.run(question)
+            handler = self.agent.run(enhanced_question)
             logger.info("[Agent Query] Got handler, starting event stream")
 
             # 收集工具调用结果
@@ -587,6 +610,7 @@ class ReportAgent:
             tool_results = []
             financial_summary_override = None
             summary_override = None
+            sources = []  # 收集数据来源
 
             # 流式处理事件以捕获工具调用结果 - 添加性能监控
             import time
@@ -620,6 +644,23 @@ class ReportAgent:
                                 logger.warning(f"⚠️ [{event_time:.2f}s] 工具 {tool_name} 执行时间过长: {tool_duration:.2f}秒，可能影响整体性能")
                         else:
                             logger.info(f"[Agent Query] [{event_time:.2f}s] ✅ Tool result: {tool_name}")
+
+                        # 从工具输出中提取 sources（特别是 annual_report_query 工具）
+                        if tool_name == "annual_report_query":
+                            try:
+                                tool_output_obj = event.tool_output
+                                # 如果 tool_output 是 Response 对象，提取 source_nodes
+                                if hasattr(tool_output_obj, 'source_nodes'):
+                                    for node in tool_output_obj.source_nodes:
+                                        source_info = {
+                                            'text': node.text[:200] + "..." if len(node.text) > 200 else node.text,
+                                            'metadata': getattr(node, 'metadata', {}),
+                                            'score': getattr(node, 'score', 0.0)
+                                        }
+                                        sources.append(source_info)
+                                    logger.info(f"[Agent Query] 从 {tool_name} 工具提取到 {len(tool_output_obj.source_nodes)} 个数据来源")
+                            except Exception as source_extract_error:
+                                logger.warning(f"[Agent Query] 从 {tool_name} 工具提取 sources 时出错: {str(source_extract_error)}")
 
                         try:
                             # 将ToolOutput转换为可序列化的格式
@@ -1018,6 +1059,17 @@ class ReportAgent:
             if summary_override:
                 answer_text = summary_override
             
+            # 过滤掉 answer 中的 "assistant:" 前缀和类似的开头
+            if answer_text:
+                # 移除常见的 assistant 前缀模式
+                import re
+                # 匹配 "assistant:"、"assistant："、"Assistant:" 等开头
+                answer_text = re.sub(r'^(assistant|Assistant|ASSISTANT)[：:]\s*', '', answer_text, flags=re.IGNORECASE)
+                # 移除 "基于检索到的信息"、"根据检索到的信息" 等常见开头
+                answer_text = re.sub(r'^(基于|根据|通过).*?[，,：:]\s*', '', answer_text)
+                # 移除开头的空白字符
+                answer_text = answer_text.strip()
+            
             # 如果没有回答内容，但有工具调用结果，生成一个总结
             if not answer_text or answer_text.strip() == "":
                 if tool_results:
@@ -1028,10 +1080,188 @@ class ReportAgent:
                 else:
                     answer_text = "✅ Agent分析完成，但未返回详细内容。"
             
+            # 如果从工具调用中没找到 sources，尝试从 response 中提取
+            if not sources:
+                try:
+                    if hasattr(response, 'source_nodes'):
+                        for node in response.source_nodes:
+                            source_info = {
+                                'text': node.text[:200] + "..." if len(node.text) > 200 else node.text,
+                                'metadata': getattr(node, 'metadata', {}),
+                                'score': getattr(node, 'score', 0.0)
+                            }
+                            sources.append(source_info)
+                        logger.info(f"[Agent Query] 从 response 中提取到 {len(sources)} 个数据来源")
+                except Exception as response_sources_error:
+                    logger.warning(f"[Agent Query] 从 response 提取 sources 时出错: {str(response_sources_error)}")
+            
+            logger.info(f"[Agent Query] 总共提取到 {len(sources)} 个数据来源")
+            
+            # 如果 answer 中没有数据来源信息，但 sources 存在，自动在 answer 末尾添加数据来源
+            if sources and len(sources) > 0:
+                # 检查 answer 中是否已经包含数据来源信息
+                has_source_in_answer = any(keyword in answer_text for keyword in ['数据来源', '来源', '参考', '参考来源', '资料来源'])
+                
+                if not has_source_in_answer:
+                    # 从 sources 中提取页码信息
+                    page_numbers = []
+                    for source in sources:
+                        metadata = source.get('metadata', {})
+                        # 尝试从多个字段提取页码
+                        page_num = None
+                        
+                        # 方法1: 直接从 metadata 中获取页码字段
+                        page_num = metadata.get('page_number') or metadata.get('page') or metadata.get('page_label')
+                        
+                        # 方法2: 从 source 字段中提取（格式如 "filename_page_11"）
+                        if not page_num:
+                            source_str = metadata.get('source') or ''
+                            if source_str and '_page_' in source_str:
+                                import re
+                                page_match = re.search(r'_page_(\d+)', source_str)
+                                if page_match:
+                                    page_num = page_match.group(1)
+                        
+                        # 方法3: 从文件名中提取（如果文件名包含页码信息）
+                        if not page_num:
+                            file_name = metadata.get('file_name') or metadata.get('filename') or metadata.get('source_file') or ''
+                            if file_name and '_page_' in file_name:
+                                import re
+                                page_match = re.search(r'_page_(\d+)', file_name)
+                                if page_match:
+                                    page_num = page_match.group(1)
+                        
+                        if page_num:
+                            page_numbers.append(str(page_num))
+                    
+                    # 如果有页码信息，构建数据来源文本
+                    if page_numbers:
+                        # 去重并排序
+                        unique_pages = sorted(set(page_numbers), key=lambda x: int(x) if x.isdigit() else 999)
+                        # 合并连续页码（如 24, 25 -> 24-25）
+                        page_ranges = []
+                        i = 0
+                        while i < len(unique_pages):
+                            if unique_pages[i].isdigit():
+                                start = int(unique_pages[i])
+                                end = start
+                                # 查找连续页码
+                                while i + 1 < len(unique_pages) and unique_pages[i + 1].isdigit() and int(unique_pages[i + 1]) == end + 1:
+                                    end = int(unique_pages[i + 1])
+                                    i += 1
+                                if start == end:
+                                    page_ranges.append(str(start))
+                                else:
+                                    page_ranges.append(f"{start}-{end}")
+                            else:
+                                page_ranges.append(unique_pages[i])
+                            i += 1
+                        
+                        # 尝试从 sources 中提取公司名和年份
+                        company_name = None
+                        year = None
+                        for source in sources:
+                            metadata = source.get('metadata', {})
+                            if not company_name:
+                                company_name = metadata.get('company_name') or metadata.get('company')
+                            if not year:
+                                year = metadata.get('year') or metadata.get('report_year')
+                            if company_name and year:
+                                break
+                        
+                        # 如果从 metadata 中没提取到，尝试从文件名中提取
+                        if not company_name or not year:
+                            for source in sources:
+                                metadata = source.get('metadata', {})
+                                file_name = metadata.get('file_name') or metadata.get('filename') or metadata.get('source_file') or ''
+                                if file_name:
+                                    import re
+                                    # 从文件名中提取年份（4位数字）
+                                    if not year:
+                                        year_match = re.search(r'(\d{4})', file_name)
+                                        if year_match:
+                                            year = year_match.group(1)
+                                    # 从文件名中提取公司名（移除常见后缀）
+                                    if not company_name:
+                                        # 移除文件扩展名
+                                        name_without_ext = file_name.replace('.pdf', '').replace('.PDF', '').replace('.xlsx', '').replace('.xls', '')
+                                        # 移除年份
+                                        name_without_year = re.sub(r'\d{4}年?', '', name_without_ext)
+                                        # 移除常见的报表类型关键词
+                                        name_clean = re.sub(r'(利润表|资产负债表|现金流量表|年报|年度报告|报告|财务报表|财务报告|合并报表|母公司报表)', '', name_without_year, flags=re.IGNORECASE)
+                                        name_clean = name_clean.strip()
+                                        # 验证公司名长度（2-30个字符）
+                                        if len(name_clean) >= 2 and len(name_clean) <= 30:
+                                            company_name = name_clean
+                                    if company_name and year:
+                                        break
+                        
+                        # 如果还是没有提取到，尝试从 question 中提取
+                        if not company_name or not year:
+                            import re
+                            # 尝试从问题中提取公司名和年份
+                            if not company_name:
+                                # 匹配"分析XX公司"或"XX公司2024年"等模式
+                                company_match = re.search(r'(?:分析|查询|查看)([^0-9请帮]+?)(?:\d{4}|年|的)', question)
+                                if company_match:
+                                    company_name = company_match.group(1).strip()
+                                # 如果没有匹配到，尝试匹配"XX公司"模式
+                                if not company_name:
+                                    company_match = re.search(r'([^请帮分析查询查看]+?)(?:\d{4}|年)', question)
+                                    if company_match:
+                                        potential_name = company_match.group(1).strip()
+                                        # 验证公司名长度
+                                        if len(potential_name) >= 2 and len(potential_name) <= 30:
+                                            company_name = potential_name
+                            if not year:
+                                year_match = re.search(r'(\d{4})', question)
+                                if year_match:
+                                    year = year_match.group(1)
+                        
+                        # 构建数据来源文本
+                        source_text = f"\n\n数据来源："
+                        if company_name and year:
+                            source_text += f"{company_name}{year}年年报"
+                        elif year:
+                            source_text += f"{year}年年报"
+                        elif company_name:
+                            source_text += f"{company_name}年报"
+                        else:
+                            source_text += "年报"
+                        source_text += f"第{', '.join(page_ranges)}页"
+                        
+                        # 添加到 answer 末尾
+                        answer_text = answer_text.rstrip() + source_text
+                        logger.info(f"[Agent Query] 自动在 answer 末尾添加数据来源信息: {source_text}")
+                    else:
+                        # 如果没有页码，但仍然有 sources，至少显示来源信息
+                        # 尝试从文件名中提取信息
+                        file_names = set()
+                        for source in sources:
+                            metadata = source.get('metadata', {})
+                            file_name = metadata.get('file_name') or metadata.get('filename') or metadata.get('source') or ''
+                            if file_name:
+                                # 移除文件扩展名
+                                file_name = file_name.replace('.pdf', '').replace('.PDF', '').replace('.xlsx', '').replace('.xls', '')
+                                file_names.add(file_name)
+                        
+                        if file_names:
+                            # 使用第一个文件名作为来源
+                            source_file = list(file_names)[0]
+                            source_text = f"\n\n数据来源：{source_file}"
+                            answer_text = answer_text.rstrip() + source_text
+                            logger.info(f"[Agent Query] 自动在 answer 末尾添加数据来源信息（基于文件名）: {source_text}")
+                        else:
+                            # 如果连文件名都没有，至少显示有数据来源
+                            source_text = f"\n\n数据来源：年报相关章节"
+                            answer_text = answer_text.rstrip() + source_text
+                            logger.info(f"[Agent Query] 自动在 answer 末尾添加通用数据来源信息")
+            
             result = {
                 "status": "success",
                 "question": question,
                 "answer": answer_text,
+                "sources": sources,  # 添加 sources 字段
                 "structured_response": response.structured_response if hasattr(response, 'structured_response') else None,
                 "tool_calls": tool_results if tool_results else []  # 确保是列表
             }
@@ -1040,9 +1270,59 @@ class ReportAgent:
             if visualization_data:
                 logger.info("[Agent Query] Adding visualization data to response")
                 result["visualization"] = visualization_data
+            # 在通用查询模式下，如果 answer 包含数据但没有可视化，尝试自动生成可视化
+            elif query_type == "general" and answer_text and len(answer_text.strip()) > 50:
+                # 检查是否需要生成可视化
+                import re
+                # 1. 检查 answer 是否包含数据（数字、表格等）
+                has_numbers = bool(re.search(r'\d+[万亿千百十]?[元%]?', answer_text))
+                has_table_markers = bool(re.search(r'[|：:]\s*\d+', answer_text))
+                # 2. 检查问题是否包含财务分析相关的关键词
+                financial_keywords = ['分析', '财务', '情况', '数据', '指标', '趋势', '对比', '营收', '利润', '资产', '负债', '现金流']
+                question_lower = question.lower()
+                has_financial_query = any(keyword in question_lower for keyword in financial_keywords)
+                # 3. 检查回答中是否包含财务相关关键词
+                answer_lower = answer_text.lower()
+                has_financial_content = any(keyword in answer_lower for keyword in ['营业收入', '净利润', '资产', '负债', 'ROE', 'ROA', '毛利率', '净利率', '现金流'])
+                
+                # 如果满足任一条件，尝试生成可视化
+                should_generate_viz = has_numbers or has_table_markers or (has_financial_query and has_financial_content)
+                
+                if should_generate_viz:
+                    logger.info(f"[Agent Query] 通用查询模式下检测到数据/财务内容，尝试自动生成可视化")
+                    logger.info(f"[Agent Query] 检测结果: has_numbers={has_numbers}, has_table_markers={has_table_markers}, has_financial_query={has_financial_query}, has_financial_content={has_financial_content}")
+                    try:
+                        # 异步调用可视化生成工具
+                        from agents.visualization_agent import generate_visualization_for_query
+                        import asyncio
+                        # 设置较短的超时（15秒），避免影响整体响应时间
+                        viz_result = await asyncio.wait_for(
+                            generate_visualization_for_query(
+                                query=question,
+                                answer=answer_text,
+                                data=None,
+                                sources=sources if sources else None
+                            ),
+                            timeout=15.0
+                        )
+                        if viz_result and viz_result.get("has_visualization"):
+                            result["visualization"] = viz_result
+                            logger.info("[Agent Query] ✅ 自动生成可视化成功")
+                        else:
+                            logger.info("[Agent Query] 可视化生成工具返回无可视化结果")
+                            logger.debug(f"[Agent Query] 可视化结果: {viz_result}")
+                    except asyncio.TimeoutError:
+                        logger.warning("[Agent Query] 可视化生成超时（15秒），跳过")
+                    except Exception as viz_error:
+                        logger.warning(f"[Agent Query] 自动生成可视化失败: {str(viz_error)}")
+                        import traceback
+                        logger.debug(f"[Agent Query] 可视化生成错误详情: {traceback.format_exc()}")
+                        # 不影响主流程，继续返回结果
+                else:
+                    logger.info(f"[Agent Query] 未检测到需要生成可视化的条件，跳过自动生成")
             
             # 添加详细的调试日志，确保数据正确传递
-            logger.info(f"[Agent Query] 返回结果摘要: status={result['status']}, answer_length={len(answer_text)}, tool_calls_count={len(tool_results)}, has_visualization={bool(visualization_data)}")
+            logger.info(f"[Agent Query] 返回结果摘要: status={result['status']}, answer_length={len(answer_text)}, tool_calls_count={len(tool_results)}, sources_count={len(sources)}, has_visualization={bool(visualization_data)}")
             
             # 输出每个工具调用的详细信息
             if tool_results:

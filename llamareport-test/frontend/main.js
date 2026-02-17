@@ -268,7 +268,10 @@ const App = {
         const response = await fetch('/agent/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ 
+            question,
+            query_type: 'general'  // 输入框输入使用通用查询模式
+          }),
           signal: controller.signal
         })
         
@@ -312,7 +315,9 @@ const App = {
           }
           
           // 处理可视化
+          let hasVisualization = false
           if (result.visualization && result.visualization.has_visualization) {
+            hasVisualization = true
             if (result.visualization.type === 'financial_tables' && Array.isArray(result.visualization.tables)) {
               result.visualization.tables
                 .filter(table => table)
@@ -330,16 +335,113 @@ const App = {
                   })
                 })
             } else {
-              const cardId = Date.now().toString()
-              visualizationCards.value.push({
-                id: cardId,
-                question: question,
-                timestamp: new Date(),
-                data: result.visualization,
-                type: 'chart'
-              })
+              // 检查是否有多个视图
+              if (result.visualization.visualizations && Array.isArray(result.visualization.visualizations) && result.visualization.visualizations.length > 0) {
+                // 多个视图：为每个视图创建一个卡片
+                result.visualization.visualizations.forEach((viz, idx) => {
+                  const cardId = `${Date.now().toString()}-${idx}`
+                  visualizationCards.value.push({
+                    id: cardId,
+                    question: viz.title || question + (result.visualization.visualizations.length > 1 ? ` (${idx + 1})` : ''),
+                    timestamp: new Date(),
+                    data: {
+                      has_visualization: true,
+                      chart_config: viz.chart_config,
+                      timeline_data: viz.timeline_data,
+                      visualization_type: viz.visualization_type || 'plotly',
+                      recommendation: viz.recommendation,
+                      insights: viz.insights,
+                      description: viz.description
+                    },
+                    type: 'chart'
+                  })
+                })
+                console.log(`✅ 添加了 ${result.visualization.visualizations.length} 个可视化视图`)
+              } else {
+                // 单个视图（向后兼容）
+                const cardId = Date.now().toString()
+                visualizationCards.value.push({
+                  id: cardId,
+                  question: question,
+                  timestamp: new Date(),
+                  data: result.visualization,
+                  type: 'chart'
+                })
+              }
             }
             visualizationLoading.value = false
+          }
+          
+          // 如果Agent查询没有生成可视化，自动调用 /query/ask 接口强制生成可视化
+          if (!hasVisualization && result.answer && result.answer.length > 50) {
+            console.log('📊 Agent查询未返回可视化，尝试自动生成可视化...')
+            visualizationLoading.value = true
+            
+            try {
+              const context_filter = selectedFile.value ? {
+                filename: selectedFile.value.filename
+              } : null
+              
+              const vizResponse = await fetch('/query/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  question: question, 
+                  enable_visualization: true,
+                  context_filter: context_filter
+                })
+              })
+              
+              if (vizResponse.ok) {
+                const vizResult = await vizResponse.json()
+                
+                if (vizResult.visualization && vizResult.visualization.has_visualization) {
+                  // 检查是否有多个视图
+                  if (vizResult.visualization.visualizations && Array.isArray(vizResult.visualization.visualizations) && vizResult.visualization.visualizations.length > 0) {
+                    // 多个视图：为每个视图创建一个卡片
+                    vizResult.visualization.visualizations.forEach((viz, idx) => {
+                      const cardId = `auto-viz-${Date.now()}-${idx}`
+                      visualizationCards.value.push({
+                        id: cardId,
+                        question: viz.title || question + (vizResult.visualization.visualizations.length > 1 ? ` (${idx + 1})` : ''),
+                        timestamp: new Date(),
+                        data: {
+                          has_visualization: true,
+                          chart_config: viz.chart_config,
+                          timeline_data: viz.timeline_data,
+                          visualization_type: viz.visualization_type || 'plotly',
+                          recommendation: viz.recommendation,
+                          insights: viz.insights,
+                          description: viz.description
+                        },
+                        type: 'chart'
+                      })
+                    })
+                    console.log(`✅ 自动生成了 ${vizResult.visualization.visualizations.length} 个可视化视图`)
+                  } else {
+                    // 单个视图
+                    const cardId = `auto-viz-${Date.now()}`
+                    visualizationCards.value.push({
+                      id: cardId,
+                      question: question,
+                      timestamp: new Date(),
+                      data: vizResult.visualization,
+                      type: 'chart'
+                    })
+                    console.log('✅ 自动生成了可视化视图')
+                  }
+                } else {
+                  console.log('⚠️ 自动生成可视化失败：无可视化结果')
+                }
+              } else {
+                console.warn('⚠️ 自动生成可视化请求失败:', vizResponse.status)
+              }
+            } catch (vizError) {
+              console.warn('⚠️ 自动生成可视化时出错:', vizError)
+              // 不影响主流程，静默失败
+            } finally {
+              visualizationLoading.value = false
+            }
           }
           
           // 显示工具调用信息（可选）
@@ -1639,7 +1741,10 @@ const App = {
         const response = await fetch('/agent/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ 
+            question,
+            query_type: 'general'  // 输入框输入使用通用查询模式
+          }),
           signal: controller.signal
         })
         
@@ -2014,9 +2119,15 @@ const App = {
         visualizationCards.value = visualizationCards.value.filter(card => card.type !== 'dupont')
         dupontData.value = null
       },
-      handleGenerateComprehensiveAnalysis: async (selectedCards) => {
-        // 处理生成总分析请求
-        showMessage('loading', '正在生成总分析雷达图...')
+      handleGenerateComprehensiveAnalysis: async (selectedCards, explorationQuestion = null) => {
+        // 处理生成综合分析请求（基于视图联动方案，支持探索问题）
+        const cardCount = selectedCards.length
+        const loadingMsg = explorationQuestion
+          ? `正在聚焦分析：${explorationQuestion.substring(0, 30)}...`
+          : (cardCount === 1 
+            ? '正在分析视图并生成关联视图...' 
+            : `正在分析${cardCount}个视图的关系并生成综合分析...`)
+        showMessage('loading', loadingMsg)
         visualizationLoading.value = true
         
         try {
@@ -2024,11 +2135,26 @@ const App = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              selected_cards: selectedCards.map(card => ({
+              selected_cards: selectedCards.map(card => {
+                // ⭐修复：处理杜邦分析卡片
+                if (card.isDupontCard && card.type === 'dupont') {
+                  return {
                 id: card.id,
                 question: card.question,
-                data: card.data
-              })),
+                    data: {
+                      has_visualization: true,
+                      type: 'dupont',
+                      dupont_data: card.data.dupont_data || dupontData.value
+                    }
+                  }
+                }
+                return {
+                  id: card.id,
+                  question: card.question,
+                  data: card.data || {}
+                }
+              }),
+              exploration_question: explorationQuestion || null,  // ⭐新增：探索问题
               overview_data: quickOverviewData.value,  // 传递财务概况数据
               context_filter: selectedFile.value ? {
                 filename: selectedFile.value.filename
@@ -2039,7 +2165,7 @@ const App = {
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: '请求失败' }))
             const errorMsg = errorData.detail || errorData.error || `HTTP ${response.status}`
-            showMessage('error', `生成总分析失败: ${errorMsg}`)
+            showMessage('error', `生成综合分析失败: ${errorMsg}`)
             visualizationLoading.value = false
             // 重置选择状态
             window.dispatchEvent(new CustomEvent('reset-viz-selection'))
@@ -2048,32 +2174,184 @@ const App = {
           
           const result = await response.json()
           
-          if (result.status === 'success' && result.visualization) {
-            // 添加总分析雷达图卡片
+          if (result.status === 'success') {
+            let addedCount = 0
+            
+            // ⭐新增：在智能问答界面展示问题和洞察
+            // 构建问题文本
+            let questionText = ''
+            if (explorationQuestion && explorationQuestion.trim()) {
+              questionText = explorationQuestion.trim()
+            } else {
+              // 综合分析模式：显示"综合分析xxx"，xxx为卡片名字
+              const cardNames = selectedCards.map(card => {
+                const title = card.question || '未知视图'
+                // 提取标题的前20个字符作为卡片名字
+                return title.length > 20 ? title.substring(0, 20) + '...' : title
+              })
+              questionText = `综合分析：${cardNames.join('、')}`
+            }
+            
+            // 添加用户问题到聊天界面
+            chatMessages.value.push({
+              type: 'user',
+              content: questionText,
+              timestamp: new Date()
+            })
+            
+            // 构建洞察文本（只显示关键发现和置信度，不显示结论）
+            let insightText = ''
+            if (result.synthesis_insight) {
+              insightText = `## 💡 分析洞察\n\n`
+              
+              // ⭐只显示关键发现（不显示结论）
+              if (result.synthesis_insight.key_findings && result.synthesis_insight.key_findings.length > 0) {
+                insightText += `**关键发现：**\n`
+                result.synthesis_insight.key_findings.forEach((finding, idx) => {
+                  insightText += `${idx + 1}. ${finding}\n`
+                })
+                insightText += `\n`
+              }
+              
+              // ⭐显示置信度
+              if (result.synthesis_insight.confidence) {
+                const confidenceLabels = {
+                  'high': '高置信度',
+                  'medium': '中置信度',
+                  'low': '低置信度'
+                }
+                const confidenceLabel = confidenceLabels[result.synthesis_insight.confidence] || result.synthesis_insight.confidence
+                insightText += `**置信度：** ${confidenceLabel}\n\n`
+              }
+            }
+            
+            // 添加洞察到聊天界面
+            if (insightText) {
+              chatMessages.value.push({
+                type: 'assistant',
+                content: insightText,
+                timestamp: new Date()
+              })
+            }
+            
+            // 优先使用新格式（new_views）- 一体化卡片（视图+洞察）
+            console.log('📊 收到响应:', {
+              hasNewViews: !!(result.new_views && result.new_views.length > 0),
+              newViewsCount: result.new_views?.length || 0,
+              hasSynthesisInsight: !!(result.synthesis_insight && result.synthesis_insight.conclusion),
+              newViews: result.new_views
+            })
+            
+            if (result.new_views && result.new_views.length > 0) {
+              // 添加多个新视图卡片（一体化：视图+洞察）
+              result.new_views.forEach((view, index) => {
+                console.log(`📊 处理视图 ${index + 1}:`, {
+                  view_id: view.view_id,
+                  view_type: view.view_type,
+                  description: view.description,
+                  hasVisualization: view.visualization?.has_visualization,
+                  visualizationType: view.visualization?.visualization_type,
+                  hasInsight: !!view.insight
+                })
+                const cardId = `linkage_${Date.now()}_${index}`
+                
+                // 提取洞察信息
+                const insight = view.insight || (result.synthesis_insight ? {
+                  conclusion: result.synthesis_insight.conclusion,
+                  key_findings: result.synthesis_insight.key_findings || [],
+                  confidence: result.synthesis_insight.confidence || 'medium'
+                } : null)
+                
+                // 构建一体化卡片
+                // 确保data有has_visualization字段
+                const cardData = view.visualization || {}
+                if (!cardData.has_visualization && (cardData.chart_config || cardData.timeline_data || cardData.table)) {
+                  cardData.has_visualization = true
+                  if (!cardData.visualization_type) {
+                    if (cardData.chart_config) cardData.visualization_type = 'plotly'
+                    else if (cardData.timeline_data) cardData.visualization_type = 'timeline'
+                    else if (cardData.table) cardData.visualization_type = 'table'
+                    else cardData.visualization_type = 'plotly'
+                  }
+                }
+                
+                visualizationCards.value.push({
+                  id: cardId,
+                  question: view.description || `视图 ${index + 1}`,
+                  timestamp: new Date(),
+                  data: cardData,
+                  type: 'chart',
+                  // 联动生成标记
+                  isLinkageGenerated: true,
+                  viewType: view.view_type,
+                  dataQuality: view.data_quality,
+                  relatedCards: view.related_cards || [],
+                  explorationQuestion: explorationQuestion,  // 探索问题
+                  insight: insight,  // 洞察信息
+                  showRelated: false  // UI状态
+                })
+                addedCount++
+              })
+              
+              // 如果只有综合洞察但没有视图，创建一个洞察卡片
+              if (result.synthesis_insight && result.synthesis_insight.conclusion && result.new_views.length === 0) {
+                const insightCardId = `insight_${Date.now()}`
+                visualizationCards.value.push({
+                  id: insightCardId,
+                  question: '综合洞察',
+                  timestamp: new Date(),
+                  data: {
+                    has_visualization: false
+                  },
+                  type: 'insight',
+                  isLinkageGenerated: true,
+                  viewType: 'comprehensive',
+                  explorationQuestion: explorationQuestion,
+                  insight: {
+                    conclusion: result.synthesis_insight.conclusion,
+                    key_findings: result.synthesis_insight.key_findings || [],
+                    confidence: result.synthesis_insight.confidence || 'medium'
+                  },
+                  showRelated: false
+                })
+                addedCount++
+              }
+              
+              showMessage('success', `✅ 已生成${addedCount}个关联视图`)
+            }
+            // 兼容原有格式（单一视图）
+            else if (result.visualization) {
             const cardId = Date.now().toString()
             visualizationCards.value.push({
               id: cardId,
-              question: '综合能力分析雷达图',
+                question: '综合分析',
               timestamp: new Date(),
               data: result.visualization,
               type: 'chart'
             })
-            showMessage('success', '✅ 总分析雷达图已生成')
+              showMessage('success', '✅ 综合分析已生成')
+              addedCount = 1
+            }
+            // 如果没有视图，显示提示
+            else {
+              showMessage('warning', '⚠️ 未生成新视图，请检查选中的卡片是否有有效的视图数据')
+            }
+            
             visualizationLoading.value = false
             
             // 重置选择状态，允许再次选择
             window.dispatchEvent(new CustomEvent('reset-viz-selection'))
           } else {
             const errorMsg = result.error || result.detail || '生成失败'
-            showMessage('error', `生成总分析失败: ${errorMsg}`)
+            showMessage('error', `生成综合分析失败: ${errorMsg}`)
             visualizationLoading.value = false
             // 重置选择状态
             window.dispatchEvent(new CustomEvent('reset-viz-selection'))
           }
         } catch (error) {
-          console.error('生成总分析错误:', error)
+          console.error('生成综合分析错误:', error)
           const errorMsg = error.message || '网络错误或服务器无响应'
-          showMessage('error', `生成总分析失败: ${errorMsg}`)
+          showMessage('error', `生成综合分析失败: ${errorMsg}`)
           visualizationLoading.value = false
           // 重置选择状态
           window.dispatchEvent(new CustomEvent('reset-viz-selection'))

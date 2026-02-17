@@ -2,31 +2,88 @@
   <Card title="可视化视图" icon="📊" :status="status" empty-text="暂无可视化数据">
     <template #default>
       <div class="visualization-panel-container">
-        <!-- 选择模式和生成总分析按钮 -->
-        <div v-if="hasAnyVisualization" class="viz-controls">
-          <button 
-            class="toggle-select-btn" 
-            :class="{ active: selectionMode }"
-            @click="toggleSelectionMode"
-          >
-            {{ selectionMode ? '取消选择' : '选择卡片' }}
-          </button>
-          <button 
-            v-if="selectionMode && selectedCards.length > 0"
-            class="generate-analysis-btn"
-            @click="generateComprehensiveAnalysis"
-            :disabled="generatingAnalysis"
-          >
-            {{ generatingAnalysis ? '生成中...' : `生成总分析 (已选${selectedCards.length}个)` }}
-          </button>
+        <!-- 浮动操作栏（当有卡片被选中时显示） -->
+        <div v-if="selectedCards.length > 0" class="floating-action-bar" :style="{ display: 'block' }">
+          <div class="action-bar-content">
+            <!-- 第一行：选中卡片信息和生成按钮（右上角） -->
+            <div class="action-bar-row-top">
+              <div class="selected-cards-info">
+                <div class="selected-badge">
+                  <span class="selected-icon">✓</span>
+                  <span class="selected-count-text">{{ selectedCards.length }}</span>
+                </div>
+                <span class="selected-label">个视图已选中</span>
+                <button class="clear-selection-btn" @click="clearSelection" title="清除选择">
+                  <span class="clear-icon">×</span>
+                </button>
+              </div>
+              
+              <button 
+                class="generate-btn-primary"
+                @click="handleGenerateAnalysis"
+                :disabled="generatingAnalysis"
+              >
+                <span v-if="generatingAnalysis" class="btn-loading">
+                  <span class="loading-spinner"></span>
+                  <span>生成中...</span>
+                </span>
+                <span v-else class="btn-content">
+                  <span class="btn-icon">✨</span>
+                  <span class="btn-text">{{ explorationQuestion.trim() ? '聚焦分析' : '综合分析' }}</span>
+                </span>
+              </button>
+            </div>
+            
+            <!-- 第二行：探索问题输入区域和推荐问题标签 -->
+            <div class="exploration-section">
+              <div class="input-wrapper">
+                <span class="input-icon">💡</span>
+                <input
+                  v-model="explorationQuestion"
+                  type="text"
+                  class="exploration-input"
+                  placeholder="输入探索问题（可选，不输入则综合分析）"
+                  @keyup.enter="handleGenerateAnalysis"
+                />
+                <div v-if="explorationQuestion" class="input-clear" @click="explorationQuestion = ''" title="清除">
+                  ×
+                </div>
+              </div>
+              
+              <!-- 推荐问题标签（紧贴输入框） -->
+              <div v-if="recommendedQuestions.length > 0" class="exploration-hints">
+                <span class="hints-label">推荐：</span>
+                <div class="hints-container">
+                  <button
+                    v-for="hint in recommendedQuestions" 
+                    :key="hint"
+                    class="hint-chip"
+                    @click="explorationQuestion = hint"
+                  >
+                    <span class="hint-icon">💭</span>
+                    <span class="hint-text">{{ hint }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         
         <!-- 卡片列表容器 -->
         <div class="visualization-cards-list" v-if="hasAnyVisualization">
           <!-- 杜邦分析卡片 -->
-          <div v-if="dupontData && (dupontData.full_data || dupontData.roe)" class="viz-card dupont-card">
+          <div 
+            v-if="dupontData && (dupontData.full_data || dupontData.roe)" 
+            class="viz-card dupont-card"
+            :class="{ 'selected': isDupontCardSelected }"
+            @click="handleDupontCardClick($event)"
+          >
             <div class="viz-card-header">
               <div class="viz-card-title">
+                <!-- 选中标记（直接选择模式） -->
+                <span v-if="isDupontCardSelected" class="selection-checkbox checked">
+                  ✓
+                </span>
                 <span class="viz-card-icon">📊</span>
                 <h3>杜邦分析树状视图</h3>
               </div>
@@ -37,13 +94,14 @@
                     v-model="selectedDupontYear"
                     class="dupont-year-select"
                     title="切换年份"
+                    @click.stop
                   >
                     <option v-for="year in dupontYears" :key="year" :value="year">{{ year }}</option>
                   </select>
                   <span v-else>{{ selectedDupontYear || dupontData.full_data.report_year || '未知年份' }}</span>
                 </div>
                 <div class="viz-card-actions">
-                  <button class="viz-card-close" @click="removeDupontCard" title="删除">×</button>
+                  <button class="viz-card-close" @click.stop="removeDupontCard" title="删除">×</button>
                 </div>
               </div>
             </div>
@@ -132,28 +190,56 @@
             </div>
           </div>
           
+          <!-- 分隔线（如果有联动生成的卡片） -->
+          <div v-if="hasLinkageCards" class="cards-divider">
+            <span class="divider-text">✨ 联动生成视图</span>
+          </div>
+          
           <!-- 普通查询可视化卡片列表（排除杜邦分析类型，因为杜邦分析通过dupontData显示） -->
           <div 
             v-for="card in displayCards" 
-            :key="card.id" 
+            :key="card.id || `card-${card.timestamp?.getTime() || Date.now()}`" 
             class="viz-card chart-card"
-            :class="{ 'selected': isCardSelected(card.id), 'selectable': selectionMode }"
+            :class="{ 
+              'selected': isCardSelected(card.id), 
+              'linkage-card': card.isLinkageGenerated,
+              [`linkage-type-${card.viewType}`]: card.isLinkageGenerated
+            }"
             @click="handleCardClick(card.id, $event)"
           >
             <div class="viz-card-header">
               <div class="viz-card-title">
-                <span v-if="selectionMode" class="selection-checkbox" :class="{ checked: isCardSelected(card.id) }">
-                  {{ isCardSelected(card.id) ? '✓' : '' }}
+                <!-- 选中标记（直接选择模式） -->
+                <span v-if="isCardSelected(card.id)" class="selection-checkbox checked">
+                  ✓
                 </span>
-                <span class="viz-card-icon">📊</span>
+                <!-- 视图类型图标 -->
+                <span class="viz-card-icon">{{ getViewTypeIcon(card.viewType) }}</span>
                 <h3>{{ formatCardTitle(card.question || '数据可视化') }}</h3>
+                <!-- 视图类型标签（联动生成的卡片） -->
+                <span v-if="card.isLinkageGenerated && card.viewType" class="view-type-badge" :class="`badge-${card.viewType}`">
+                  {{ getViewTypeLabel(card.viewType) }}
+                </span>
+                <!-- 数据质量标记（联动生成的卡片） -->
+                <span v-if="card.isLinkageGenerated && card.dataQuality" class="data-quality-badge" :class="`quality-${card.dataQuality}`">
+                  {{ getQualityLabel(card.dataQuality) }}
+                </span>
               </div>
               <div class="viz-card-actions">
                 <button class="viz-card-close" @click.stop="removeCard(card.id, $event)" title="删除">×</button>
               </div>
             </div>
             <div class="viz-card-content">
+              <!-- 探索问题提示（联动生成的卡片） -->
+              <div v-if="card.isLinkageGenerated && card.explorationQuestion" class="exploration-context">
+                <span class="context-icon">🔍</span>
+                <span class="context-label">回答：</span>
+                <span class="context-question">{{ card.explorationQuestion }}</span>
+              </div>
+              
               <div v-if="card.data && card.data.has_visualization" class="chart-card-content">
+                <!-- 视图部分 -->
+                <div class="view-section">
                 <!-- 财务表格 -->
                 <div v-if="card.type === 'financial_table' && card.data.table" class="table-container" :class="{ 'table-container--auto': isKeyMetricsTable(card.data.table) }">
                   <table class="financial-table">
@@ -204,36 +290,108 @@
                 </div>
                 <!-- Plotly图表 -->
                 <div v-else :id="'chart-' + card.id" class="chart-container-inline"></div>
-                
-                <!-- 综合能力分析文本 -->
-                <div v-if="card.data.analysis_text" class="analysis-text-box">
-                  <div v-html="formatAnalysisText(card.data.analysis_text)"></div>
+                </div>
+                <!-- 洞察部分（联动生成的卡片） -->
+                <div v-if="card.isLinkageGenerated" class="insight-section">
+                  <!-- 主要洞察 -->
+                  <div v-if="card.insight" class="main-insight">
+                    <div class="insight-header">
+                      <span class="insight-icon">💡</span>
+                      <span class="insight-title">洞察</span>
+                      <span v-if="card.insight.confidence" class="confidence-badge" :class="`confidence-${card.insight.confidence}`">
+                        {{ getConfidenceLabel(card.insight.confidence) }}
+                      </span>
+                    </div>
+                    <div class="insight-content">
+                      <!-- 只显示结论（不显示关键发现） -->
+                      <div v-if="card.insight.conclusion" class="insight-conclusion">
+                        <span v-html="formatInsightText(card.insight.conclusion)"></span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <!-- 图表说明 -->
+                  <div v-if="card.data.recommendation" class="recommendation-box">
+                    <div class="recommendation-header">
+                      <span class="recommendation-icon">📈</span>
+                      <span class="recommendation-title">图表说明</span>
+                    </div>
+                    <div class="recommendation-content">
+                      <p><strong>图表类型：</strong>{{ getChartTypeName(getActualChartType(card.data)) }}</p>
+                      <p v-if="card.data.recommendation.reason"><strong>推荐理由：</strong>{{ card.data.recommendation.reason }}</p>
+                    </div>
+                  </div>
+                  
+                  <!-- 数据洞察 -->
+                  <div v-if="card.data.insights && card.data.insights.length > 0" class="data-insights">
+                    <div class="data-insights-header">
+                      <span class="data-insights-icon">📊</span>
+                      <span class="data-insights-title">数据洞察</span>
+                    </div>
+                    <div class="data-insights-content">
+                      <div 
+                        v-for="(insight, index) in card.data.insights" 
+                        :key="index" 
+                        class="data-insight-item"
+                      >
+                        <span class="insight-type-icon">{{ getInsightIcon(insight.insight_type) }}</span>
+                        <div class="insight-text" v-html="formatInsightText(insight.description)"></div>
+                        <ul v-if="insight.key_findings && insight.key_findings.length > 0" class="insight-findings-list">
+                          <li v-for="(finding, idx) in insight.key_findings" :key="idx" v-html="formatInsightText(finding)"></li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <!-- 关联信息（可展开） -->
+                  <div v-if="card.relatedCards && card.relatedCards.length > 0" class="related-cards-info">
+                    <button class="toggle-related-btn" @click="card.showRelated = !card.showRelated">
+                      {{ card.showRelated ? '隐藏' : '显示' }}关联视图
+                    </button>
+                    <div v-if="card.showRelated" class="related-cards-list">
+                      <span 
+                        v-for="relatedId in card.relatedCards" 
+                        :key="relatedId"
+                        class="related-card-tag"
+                      >
+                        {{ getCardTitle(relatedId) }}
+                      </span>
+                    </div>
+                  </div>
                 </div>
                 
-                <!-- 推荐说明 -->
-                <div v-if="card.data.recommendation && card.type !== 'financial_table'" class="recommendation-box">
-                  <h4>📈 图表推荐</h4>
-                  <p><strong>推荐图表类型:</strong> 
-                    <span>{{ getChartTypeName(getActualChartType(card.data)) }}</span>
-                  </p>
-                  <p><strong>推荐理由:</strong> {{ card.data.recommendation.reason }}</p>
-                </div>
-                
-                <!-- 数据洞察 -->
-                <div v-if="card.data.insights && card.data.insights.length > 0 && card.type !== 'financial_table'" class="insights-box">
-                  <h3>💡 数据洞察</h3>
-                  <div 
-                    v-for="(insight, index) in card.data.insights" 
-                    :key="index" 
-                    class="insight-item"
-                  >
-                    <h4>
-                      <span class="insight-icon">{{ getInsightIcon(insight.insight_type) }}</span>
-                      <span v-html="formatInsightText(insight.description)"></span>
-                    </h4>
-                    <ul v-if="insight.key_findings && insight.key_findings.length > 0">
-                      <li v-for="(finding, idx) in insight.key_findings" :key="idx" v-html="formatInsightText(finding)"></li>
-                    </ul>
+                <!-- 原有洞察展示（非联动生成的卡片） -->
+                <div v-else>
+                  <!-- 综合能力分析文本 -->
+                  <div v-if="card.data.analysis_text" class="analysis-text-box">
+                    <div v-html="formatAnalysisText(card.data.analysis_text)"></div>
+                  </div>
+                  
+                  <!-- 推荐说明 -->
+                  <div v-if="card.data.recommendation && card.type !== 'financial_table'" class="recommendation-box">
+                    <h4>📈 图表推荐</h4>
+                    <p><strong>推荐图表类型:</strong> 
+                      <span>{{ getChartTypeName(getActualChartType(card.data)) }}</span>
+                    </p>
+                    <p><strong>推荐理由:</strong> {{ card.data.recommendation.reason }}</p>
+                  </div>
+                  
+                  <!-- 数据洞察 -->
+                  <div v-if="card.data.insights && card.data.insights.length > 0 && card.type !== 'financial_table'" class="insights-box">
+                    <h3>💡 数据洞察</h3>
+                    <div 
+                      v-for="(insight, index) in card.data.insights" 
+                      :key="index" 
+                      class="insight-item"
+                    >
+                      <h4>
+                        <span class="insight-icon">{{ getInsightIcon(insight.insight_type) }}</span>
+                        <span v-html="formatInsightText(insight.description)"></span>
+                      </h4>
+                      <ul v-if="insight.key_findings && insight.key_findings.length > 0">
+                        <li v-for="(finding, idx) in insight.key_findings" :key="idx" v-html="formatInsightText(finding)"></li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -374,31 +532,120 @@ export default {
   emits: ['remove-card', 'remove-dupont-card', 'generate-comprehensive-analysis'],
   data() {
     return {
-      selectionMode: false,
       selectedCards: [],
+      selectedDupontCard: false,  // ⭐新增：杜邦分析卡片是否被选中
       generatingAnalysis: false,
-      selectedDupontYear: null
+      selectedDupontYear: null,
+      explorationQuestion: '',  // 探索问题
+      recommendedQuestions: []  // 推荐问题（基于选中卡片）
     }
   },
   computed: {
+    // 是否有联动生成的卡片
+    hasLinkageCards() {
+      return this.visualizationCards.some(card => card.isLinkageGenerated)
+    },
     status() {
       if (this.loading) return 'loading';
       if (this.hasAnyVisualization) return 'content';
       return 'empty';
     },
     hasAnyVisualization() {
-      return (this.chartData && this.chartData.has_visualization) || 
-             (this.dupontData && (this.dupontData.full_data || this.dupontData.roe)) ||
-             (this.displayCards && this.displayCards.length > 0);
+      const hasChartData = this.chartData && this.chartData.has_visualization;
+      const hasDupontData = this.dupontData && (this.dupontData.full_data || this.dupontData.roe);
+      const hasDisplayCards = this.displayCards && this.displayCards.length > 0;
+      
+      // 添加调试日志
+      console.log('🔍 hasAnyVisualization 检查:', {
+        hasChartData,
+        hasDupontData,
+        hasDisplayCards,
+        displayCardsCount: this.displayCards?.length || 0,
+        visualizationCardsCount: this.visualizationCards?.length || 0,
+        dupontData: !!this.dupontData
+      });
+      
+      return hasChartData || hasDupontData || hasDisplayCards;
     },
     displayCards() {
-      if (!Array.isArray(this.visualizationCards)) return [];
-      return this.visualizationCards.filter(card => {
-        if (!card || card.type === 'dupont') return false;
-        if (card.type !== 'financial_table') return true;
-        const title = card.data?.table?.title || card.question || '';
-        return !this.isHiddenBusinessMetricTable(title);
+      if (!Array.isArray(this.visualizationCards)) {
+        console.warn('⚠️ visualizationCards 不是数组:', this.visualizationCards);
+        return [];
+      }
+      
+      console.log(`📊 displayCards 开始过滤: 原始卡片数量 ${this.visualizationCards.length}`);
+      
+      const filtered = this.visualizationCards.filter(card => {
+        // 基本检查
+        if (!card) {
+          console.warn('⚠️ 发现空卡片，将被过滤');
+          return false;
+        }
+        
+        // 排除杜邦分析类型（杜邦分析通过dupontData显示）
+        if (card.type === 'dupont') {
+          console.log(`ℹ️ 卡片 ${card.id} 是杜邦分析类型，将被过滤`);
+          return false;
+        }
+        
+        // 检查卡片是否有可视化数据
+        if (!card.data) {
+          console.warn(`⚠️ 卡片 ${card.id} 没有 data 字段，将被过滤:`, {
+            id: card.id,
+            question: card.question,
+            type: card.type
+          });
+          return false;
+        }
+        
+        if (!card.data.has_visualization) {
+          console.warn(`⚠️ 卡片 ${card.id} 没有可视化数据（has_visualization=false），将被过滤:`, {
+            id: card.id,
+            question: card.question,
+            type: card.type,
+            data: card.data
+          });
+          return false;
+        }
+        
+        // 对于财务表格类型，检查是否被隐藏
+        if (card.type === 'financial_table') {
+          const title = card.data?.table?.title || card.question || '';
+          const isHidden = this.isHiddenBusinessMetricTable(title);
+          if (isHidden) {
+            console.log(`ℹ️ 财务表格 "${title}" 被标记为隐藏，将被过滤`);
+            return false;
+          }
+        }
+        
+        // 其他类型的卡片都显示
+        console.log(`✅ 卡片 ${card.id} 通过过滤:`, {
+          id: card.id,
+          question: card.question,
+          type: card.type,
+          hasVisualization: card.data.has_visualization
+        });
+        return true;
       });
+      
+      console.log(`📊 displayCards 过滤完成: 原始 ${this.visualizationCards.length} 个，过滤后 ${filtered.length} 个`);
+      if (filtered.length < this.visualizationCards.length) {
+        const filteredIds = filtered.map(c => c.id);
+        const allIds = this.visualizationCards.map(c => c.id);
+        const removedIds = allIds.filter(id => !filteredIds.includes(id));
+        console.log(`📋 被过滤的卡片ID:`, removedIds);
+      }
+      
+      // ⭐按时间戳排序：新生成的放在最上面（降序）
+      const sorted = filtered.sort((a, b) => {
+        const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+        const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+        return timeB - timeA; // 降序：最新的在前
+      });
+      
+      console.log(`📊 displayCards 排序完成: 按时间戳降序排列，最新视图在最上面`);
+      
+      return sorted;
     },
     hasInsights() {
       return this.chartData?.insights && this.chartData.insights.length > 0;
@@ -1016,32 +1263,94 @@ export default {
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/\n/g, '<br>');
     },
-    toggleSelectionMode() {
-      this.selectionMode = !this.selectionMode
-      if (!this.selectionMode) {
-        this.selectedCards = []
-      }
-    },
     handleCardClick(cardId, event) {
       // 如果点击的是删除按钮，不处理选择逻辑
       if (event && event.target && (event.target.classList.contains('viz-card-close') || event.target.closest('.viz-card-close'))) {
         return
       }
       
-      if (!this.selectionMode) return
-      
+      // 直接选择模式：点击卡片即可选择/取消选择
       const index = this.selectedCards.indexOf(cardId)
       if (index > -1) {
         this.selectedCards.splice(index, 1)
       } else {
         this.selectedCards.push(cardId)
       }
+      
+      // 更新推荐问题
+      this.updateRecommendedQuestions()
     },
-    isCardSelected(cardId) {
-      return this.selectedCards.includes(cardId)
+    // ⭐新增：处理杜邦分析卡片点击
+    handleDupontCardClick(event) {
+      // 如果点击的是删除按钮或年份选择器，不处理选择逻辑
+      if (event && event.target && (
+        event.target.classList.contains('viz-card-close') || 
+        event.target.closest('.viz-card-close') ||
+        event.target.classList.contains('dupont-year-select') ||
+        event.target.closest('.dupont-year-select')
+      )) {
+        return
+      }
+      
+      // 切换杜邦分析卡片的选择状态
+      this.selectedDupontCard = !this.selectedDupontCard
+      
+      // 更新推荐问题
+      this.updateRecommendedQuestions()
     },
-    async generateComprehensiveAnalysis() {
-      if (this.selectedCards.length === 0) {
+    clearSelection() {
+      this.selectedCards = []
+      this.selectedDupontCard = false  // ⭐新增：清除杜邦分析卡片选择
+      this.explorationQuestion = ''
+      this.recommendedQuestions = []
+    },
+    updateRecommendedQuestions() {
+      // 根据选中的卡片生成推荐问题（包括杜邦分析卡片）
+      const selected = this.visualizationCards.filter(card => 
+        this.selectedCards.includes(card.id)
+      )
+      
+      // ⭐新增：如果杜邦分析卡片被选中，也加入推荐问题生成
+      const hasDupontSelected = this.selectedDupontCard
+      
+      if (selected.length === 0 && !hasDupontSelected) {
+        this.recommendedQuestions = []
+        return
+      }
+      
+      const questions = []
+      
+      // 单卡片推荐
+      if (selected.length === 1) {
+        const card = selected[0]
+        const title = card.question || ''
+        
+        if (title.includes('营收') || title.includes('收入')) {
+          questions.push('营收增长的主要原因是什么？')
+          questions.push('营收趋势未来如何？')
+        }
+        if (title.includes('利润') || title.includes('ROE')) {
+          questions.push('利润变化的主要原因是什么？')
+          questions.push('ROE下降的原因是什么？')
+        }
+        if (title.includes('资产') || title.includes('负债')) {
+          questions.push('资产结构如何？')
+          questions.push('负债率是否合理？')
+        }
+      }
+      
+      // 多卡片推荐
+      if (selected.length > 1) {
+        questions.push('这些指标之间有什么关联？')
+        questions.push('这些视图反映了什么趋势？')
+        questions.push('哪些因素影响了这些指标？')
+      }
+      
+      this.recommendedQuestions = questions.slice(0, 3)
+    },
+    handleGenerateAnalysis() {
+      // ⭐修改：检查是否有选中的卡片（包括杜邦分析卡片）
+      if (this.selectedCards.length === 0 && !this.selectedDupontCard) {
         return
       }
       
@@ -1052,18 +1361,86 @@ export default {
           this.selectedCards.includes(card.id)
         )
         
-        // 触发事件，传递选中的卡片数据
-        this.$emit('generate-comprehensive-analysis', selectedCardsData)
+        // ⭐新增：如果杜邦分析卡片被选中，添加杜邦分析数据
+        if (this.selectedDupontCard && this.dupontData) {
+          selectedCardsData.push({
+            id: 'dupont-analysis-card',
+            question: '杜邦分析',
+            timestamp: new Date(),
+            data: {
+              has_visualization: true,
+              type: 'dupont',
+              dupont_data: this.dupontData
+            },
+            type: 'dupont',
+            isDupontCard: true
+          })
+        }
+        
+        // 触发事件，传递选中的卡片数据和探索问题
+        this.$emit('generate-comprehensive-analysis', selectedCardsData, this.explorationQuestion.trim() || null)
       } catch (error) {
         console.error('生成总分析失败:', error)
         this.generatingAnalysis = false
       }
-      // 注意：成功时generatingAnalysis会在父组件处理完成后重置
     },
+    isCardSelected(cardId) {
+      return this.selectedCards.includes(cardId)
+    },
+    // ⭐新增：检查杜邦分析卡片是否被选中
+    isDupontCardSelected() {
+      return this.selectedDupontCard
+    },
+    // 已移除，使用handleGenerateAnalysis替代
     resetSelection() {
       // 重置选择状态（由父组件调用）
       this.selectedCards = []
+      this.explorationQuestion = ''
       this.generatingAnalysis = false
+      this.recommendedQuestions = []
+    },
+    // 获取视图类型图标
+    getViewTypeIcon(viewType) {
+      const icons = {
+        'verify': '✓',
+        'explain': '🔍',
+        'navigate': '🧭',
+        'comprehensive': '💡'
+      }
+      return icons[viewType] || '📊'
+    },
+    // 获取视图类型标签
+    getViewTypeLabel(viewType) {
+      const labels = {
+        'verify': '验证',
+        'explain': '解释',
+        'navigate': '导航',
+        'comprehensive': '综合'
+      }
+      return labels[viewType] || viewType
+    },
+    // 获取数据质量标签
+    getQualityLabel(quality) {
+      const labels = {
+        'high': '高质量',
+        'medium': '中等',
+        'low': '低质量'
+      }
+      return labels[quality] || quality
+    },
+    // 获取置信度标签
+    getConfidenceLabel(confidence) {
+      const labels = {
+        'high': '高置信度',
+        'medium': '中置信度',
+        'low': '低置信度'
+      }
+      return labels[confidence] || confidence
+    },
+    // 获取卡片标题（根据ID）
+    getCardTitle(cardId) {
+      const card = this.visualizationCards.find(c => c.id === cardId)
+      return card ? (card.question || '未知视图') : '未知视图'
     }
   },
   mounted() {
@@ -1190,12 +1567,13 @@ export default {
   cursor: not-allowed;
 }
 
-.viz-card.selectable {
+/* 卡片直接选择（无需切换模式） */
+.viz-card {
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.viz-card.selectable:hover {
+.viz-card:hover {
   border-color: #0284c7;
   box-shadow: 0 2px 8px rgba(2, 132, 199, 0.15);
 }
@@ -1204,6 +1582,116 @@ export default {
   border: 2px solid #0284c7;
   background: #f0f9ff;
   box-shadow: 0 4px 12px rgba(2, 132, 199, 0.2);
+  position: relative;
+}
+
+.viz-card.selected::before {
+  content: '✓';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  background: #0284c7;
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  z-index: 10;
+  font-size: 14px;
+}
+
+/* 联动生成的卡片样式 */
+.viz-card.linkage-card {
+  border-left: 4px solid #007bff;
+  background: #fafbfc;
+}
+
+.viz-card.linkage-type-verify {
+  border-left-color: #28a745;
+}
+
+.viz-card.linkage-type-explain {
+  border-left-color: #17a2b8;
+}
+
+.viz-card.linkage-type-navigate {
+  border-left-color: #ffc107;
+}
+
+.viz-card.linkage-type-comprehensive {
+  border-left-color: #6f42c1;
+}
+
+/* 视图类型标签 */
+.view-type-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  margin-left: 8px;
+}
+
+.badge-verify {
+  background: #d4edda;
+  color: #155724;
+}
+
+.badge-explain {
+  background: #d1ecf1;
+  color: #0c5460;
+}
+
+.badge-navigate {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.badge-comprehensive {
+  background: #e2d9f3;
+  color: #6f42c1;
+}
+
+/* 数据质量标记 */
+.data-quality-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.quality-high {
+  background: #d4edda;
+  color: #155724;
+}
+
+.quality-medium {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.quality-low {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+/* 分隔线 */
+.cards-divider {
+  margin: 24px 0 16px 0;
+  padding: 12px 0;
+  border-top: 2px dashed #e0e0e0;
+  text-align: center;
+}
+
+.divider-text {
+  background: #fff;
+  padding: 0 16px;
+  color: #666;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .selection-checkbox {
@@ -1428,5 +1916,596 @@ export default {
 
 .analysis-text-box :deep(li) {
   margin: 4px 0;
+}
+
+/* 浮动操作栏 - 优化后的现代化设计（紧凑型） */
+.floating-action-bar {
+  position: relative;
+  background: #ffffff;
+  border: 2px solid #e5e7eb;
+  padding: 12px 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06), 0 1px 4px rgba(0, 0, 0, 0.03);
+  z-index: 100;
+  margin: 16px 0;
+  background: rgba(255, 255, 255, 1);
+  width: 100%;
+  box-sizing: border-box;
+  overflow: visible;
+  border-radius: 10px;
+  display: block !important;
+  visibility: visible !important;
+}
+
+.action-bar-content {
+  max-width: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 第一行：选中信息和生成按钮 */
+.action-bar-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  flex-wrap: nowrap;
+  position: relative;
+}
+
+/* 左侧：选中卡片信息 */
+.selected-cards-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+}
+
+.selected-badge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-weight: 600;
+  font-size: 12px;
+  box-shadow: 0 2px 6px rgba(102, 126, 234, 0.25);
+}
+
+.selected-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.selected-count-text {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.selected-label {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.clear-selection-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+}
+
+.clear-selection-btn:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  transform: scale(1.1);
+}
+
+.clear-icon {
+  font-size: 16px;
+  color: #6b7280;
+  line-height: 1;
+  font-weight: 300;
+}
+
+.clear-selection-btn:hover .clear-icon {
+  color: #dc2626;
+}
+
+/* 探索问题输入区域和推荐问题（合并在一起） */
+.exploration-section {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: #ffffff;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
+  transition: all 0.3s;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.input-wrapper:focus-within {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1), 0 1px 4px rgba(102, 126, 234, 0.12);
+}
+
+.input-icon {
+  padding: 0 12px;
+  font-size: 16px;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.exploration-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  padding: 10px 8px;
+  font-size: 13px;
+  color: #111827;
+  background: transparent;
+  min-width: 0;
+}
+
+.exploration-input::placeholder {
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.input-clear {
+  padding: 0 12px;
+  font-size: 18px;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: all 0.2s;
+  line-height: 1;
+  font-weight: 300;
+}
+
+.input-clear:hover {
+  color: #6b7280;
+  transform: scale(1.15);
+}
+
+/* 推荐问题标签 */
+.exploration-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.hints-label {
+  font-size: 11px;
+  color: #6b7280;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.hints-container {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.hint-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border: 1px solid #bae6fd;
+  border-radius: 16px;
+  font-size: 11px;
+  color: #0369a1;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.hint-chip:hover {
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: #60a5fa;
+  transform: translateY(-1px);
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.2);
+}
+
+.hint-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.hint-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+  line-height: 1.3;
+}
+
+.hint-chip:hover {
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: #60a5fa;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.2);
+}
+
+.hint-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+
+/* 生成按钮（缩小版，右上角） */
+.generate-btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.35);
+  min-width: 100px;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  height: 32px;
+  margin-left: auto;
+  order: 2;
+}
+
+.generate-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 12px rgba(102, 126, 234, 0.45);
+  background: linear-gradient(135deg, #5568d3 0%, #6a3f8f 100%);
+}
+
+.generate-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.generate-btn-primary:disabled {
+  background: #d1d5db;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.btn-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.btn-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.btn-text {
+  line-height: 1.3;
+  font-size: 12px;
+}
+
+/* 探索问题提示 */
+.exploration-context {
+  padding: 12px 16px;
+  background: #e7f3ff;
+  border-left: 3px solid #007bff;
+  margin: 0 0 16px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.context-icon {
+  font-size: 16px;
+}
+
+.context-label {
+  font-weight: 500;
+  color: #666;
+}
+
+.context-question {
+  color: #333;
+  font-style: italic;
+}
+
+/* 视图部分 */
+.view-section {
+  padding: 16px;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+/* 洞察部分 */
+.insight-section {
+  padding: 16px;
+  background: #fff;
+}
+
+.main-insight {
+  margin-bottom: 16px;
+  padding: 10px 12px;  /* ⭐减小内边距 */
+  background: #f8f9fa;
+  border-radius: 6px;
+  border-left: 3px solid #007bff;
+}
+
+.insight-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-weight: 600;
+  color: #333;
+  font-size: 13px;  /* ⭐缩小标题字体 */
+}
+
+.insight-conclusion {
+  margin-bottom: 12px;
+  line-height: 1.5;
+  font-size: 12px;  /* ⭐缩小字体 */
+  color: #555;  /* ⭐稍微降低颜色对比度 */
+}
+
+.insight-findings {
+  margin-top: 12px;
+}
+
+.insight-findings ul {
+  margin: 8px 0 0 20px;
+  padding: 0;
+}
+
+.insight-findings li {
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+.confidence-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.confidence-high {
+  background: #d4edda;
+  color: #155724;
+}
+
+.confidence-medium {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.confidence-low {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+/* 推荐说明（联动卡片） */
+.recommendation-box {
+  margin-top: 16px;
+  padding: 12px;
+  background: #f0f7ff;
+  border-radius: 6px;
+  border-left: 3px solid #17a2b8;
+}
+
+.recommendation-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.recommendation-content p {
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+/* 数据洞察（联动卡片） */
+.data-insights {
+  margin-top: 16px;
+  padding: 12px;
+  background: #fffbf0;
+  border-radius: 6px;
+  border-left: 3px solid #ffc107;
+}
+
+.data-insights-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-weight: 500;
+}
+
+.data-insight-item {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #e0e0e0;
+}
+
+.data-insight-item:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.insight-findings-list {
+  margin: 8px 0 0 20px;
+  padding: 0;
+}
+
+.insight-findings-list li {
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+/* 关联信息 */
+.related-cards-info {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e0e0e0;
+}
+
+.toggle-related-btn {
+  padding: 6px 12px;
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.toggle-related-btn:hover {
+  background: #e0e0e0;
+}
+
+.related-cards-list {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.related-card-tag {
+  padding: 4px 10px;
+  background: #e9ecef;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #666;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .floating-action-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 16px;
+    border-radius: 16px 16px 0 0;
+  }
+  
+  .action-bar-content {
+    gap: 14px;
+  }
+  
+  .action-bar-row-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  
+  .selected-cards-info {
+    justify-content: space-between;
+  }
+  
+  .generate-btn-primary {
+    width: 100%;
+    padding: 12px 24px;
+    font-size: 13px;
+    border-radius: 10px;
+  }
+  
+  .selected-badge {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+  
+  .selected-label {
+    font-size: 12px;
+  }
+  
+  .input-wrapper {
+    border-radius: 10px;
+  }
+  
+  .exploration-input {
+    padding: 12px 10px;
+    font-size: 13px;
+  }
+  
+  .hint-chip {
+    padding: 5px 12px;
+    font-size: 11px;
+  }
+  
+  .hint-text {
+    max-width: 150px;
+  }
+  
+  .hints-label {
+    font-size: 11px;
+  }
 }
 </style>

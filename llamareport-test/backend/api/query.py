@@ -2,7 +2,7 @@
 查询API接口
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -2093,23 +2093,72 @@ class ComprehensiveAnalysisRequest(BaseModel):
     selected_cards: List[Dict[str, Any]] = Field(description="选中的可视化卡片列表")
     overview_data: Optional[Dict[str, Any]] = Field(default=None, description="财务概况数据")
     context_filter: Optional[Dict[str, Any]] = None
+    exploration_question: Optional[str] = Field(
+        default=None,
+        description="用户输入的深入探索问题（可选，如果为空则进行综合分析）"
+    )
+
+def _extract_company_and_year_from_filename(filename: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    从文件名中提取公司名和年份
+    
+    Args:
+        filename: 文件名，如"平安银行2024年年报.PDF"
+    
+    Returns:
+        (company_name, year) 元组
+    """
+    if not filename:
+        return None, None
+    
+    # 提取年份（4位数字）
+    year_match = re.search(r'20\d{2}', filename)
+    year = year_match.group() if year_match else None
+    
+    # 提取公司名（移除年份、文件扩展名、常见后缀）
+    company_name = filename
+    if year:
+        company_name = company_name.replace(year, '')
+    # 移除文件扩展名
+    company_name = re.sub(r'\.[^.]+$', '', company_name)
+    # 移除常见后缀
+    company_name = re.sub(r'(年报|报告|财务报表|财务报告|年度)', '', company_name)
+    company_name = company_name.strip()
+    
+    return company_name if company_name else None, year
+
 
 @router.post("/comprehensive-analysis")
 async def generate_comprehensive_analysis(request: ComprehensiveAnalysisRequest):
     """
-    生成综合能力分析雷达图
+    生成综合视图分析（基于视图联动方案，支持探索问题）
     
-    基于选中的可视化卡片，提取4个核心指标并生成雷达图：
-    1. 盈利能力：ROE
-    2. 运营能力：总资产周转率
-    3. 成长能力：营业收入同比增长率
-    4. 现金能力：经营活动现金流/净利润
+    支持两种模式：
+    1. 单卡片模式：选中1个卡片，生成关联视图
+    2. 多卡片模式：选中多个卡片，生成综合分析和关联视图
+    
+    探索问题：
+    - 如果提供了exploration_question，将聚焦回答用户问题（focused模式）
+    - 如果没有提供，将进行综合分析（comprehensive模式）
     
     Returns:
-        包含雷达图配置的可视化响应
+        包含新视图列表的响应（兼容原有格式）
     """
     try:
-        logger.info("收到综合能力分析请求")
+        # 处理探索问题
+        exploration_question = request.exploration_question if hasattr(request, 'exploration_question') else None
+        if exploration_question:
+            exploration_question = exploration_question.strip()
+            if not exploration_question:
+                exploration_question = None
+        
+        # 确定探索模式
+        if exploration_question:
+            exploration_mode = "focused"  # 聚焦模式：优先回答用户问题
+            logger.info(f"收到综合视图分析请求，选中{len(request.selected_cards)}个卡片，探索问题：{exploration_question[:50]}...")
+        else:
+            exploration_mode = "comprehensive"  # 综合分析模式
+            logger.info(f"收到综合视图分析请求，选中{len(request.selected_cards)}个卡片，将进行综合分析")
         
         # 获取RAG引擎
         rag_engine = get_rag_engine()
@@ -2121,67 +2170,230 @@ async def generate_comprehensive_analysis(request: ComprehensiveAnalysisRequest)
                     detail="索引未构建，请先处理文档"
                 )
         
-        # 从选中的卡片中提取已有指标
-        existing_metrics = {}
-        for card in request.selected_cards:
-            question = card.get('question', '')
-            # 尝试从问题中识别指标
-            if 'ROE' in question or '净资产收益率' in question:
-                existing_metrics['roe'] = card
-            elif '营业收入' in question:
-                existing_metrics['revenue'] = card
-            elif '净利润' in question:
-                existing_metrics['net_profit'] = card
-            elif '资产' in question and '总额' in question:
-                existing_metrics['total_assets'] = card
+        # 从context_filter中提取公司名和年份
+        company_name = None
+        year = None
+        if request.context_filter:
+            filename = request.context_filter.get('filename', '')
+            company_name, year = _extract_company_and_year_from_filename(filename)
         
-        # 提取4个核心指标（已取消偿债能力）
-        # 优先使用财务概况数据
-        metrics = await _extract_core_metrics(
-            rag_engine,
-            existing_metrics,
-            request.context_filter,
-            request.overview_data
-        )
+        # 如果没有，尝试从overview_data中获取
+        if not company_name and request.overview_data:
+            company_name = request.overview_data.get('company_name')
+            year = request.overview_data.get('year')
         
-        # 计算评分
-        scores = _calculate_ability_scores(metrics)
+        # 如果还是没有，使用默认值或从卡片中提取
+        if not company_name:
+            company_name = "未知公司"
+        if not year:
+            year = "2024"  # 默认年份
         
-        # 生成雷达图配置
-        radar_chart = _generate_radar_chart(scores, metrics)
+        logger.info(f"使用公司名: {company_name}, 年份: {year}")
         
-        # 生成能力解释文本
-        analysis_text = _generate_ability_analysis(scores, metrics)
+        # 根据卡片数量选择处理方式
+        if len(request.selected_cards) == 1:
+            # 单卡片模式：使用单卡片视图联动
+            from agents.view_linkage import SingleCardLinkageEngine
+            linkage_engine = SingleCardLinkageEngine(
+                query_engine=rag_engine.query_engine,
+                rag_engine=rag_engine
+            )
+            
+            card = request.selected_cards[0]
+            result = await linkage_engine.generate_linkage_from_card(
+                card=card,
+                company_name=company_name,
+                year=year,
+                context_filter=request.context_filter,
+                exploration_question=exploration_question,  # ⭐新增参数
+                exploration_mode=exploration_mode  # ⭐新增参数
+            )
+        else:
+            # 多卡片模式：使用多卡片视图联动
+            from agents.view_linkage import MultiCardLinkageEngine
+            linkage_engine = MultiCardLinkageEngine(
+                query_engine=rag_engine.query_engine,
+                rag_engine=rag_engine
+            )
+            
+            result = await linkage_engine.generate_linkage_from_cards(
+                selected_cards=request.selected_cards,
+                company_name=company_name,
+                year=year,
+                context_filter=request.context_filter,
+                exploration_question=exploration_question,  # ⭐新增参数
+                exploration_mode=exploration_mode  # ⭐新增参数
+            )
         
-        # 构建可视化响应
-        visualization_response = {
-            "has_visualization": True,
-            "chart_config": radar_chart,
-            "analysis_text": analysis_text,
-            "scores": scores,
-            "metrics": metrics
+        # 辅助函数：递归序列化Pydantic模型
+        def serialize_pydantic(obj):
+            """递归序列化Pydantic模型和嵌套对象"""
+            # 处理None
+            if obj is None:
+                return None
+            
+            # 处理基本类型
+            if isinstance(obj, (str, int, float, bool)):
+                return obj
+            
+            # 处理枚举类型
+            if hasattr(obj, 'value'):
+                return obj.value
+            
+            # 处理Pydantic模型
+            if hasattr(obj, 'model_dump'):
+                try:
+                    return obj.model_dump()
+                except:
+                    pass
+            if hasattr(obj, 'dict'):
+                try:
+                    return obj.dict()
+                except:
+                    pass
+            
+            # 处理字典
+            if isinstance(obj, dict):
+                return {k: serialize_pydantic(v) for k, v in obj.items()}
+            
+            # 处理列表
+            if isinstance(obj, list):
+                return [serialize_pydantic(item) for item in obj]
+            
+            # 处理元组
+            if isinstance(obj, tuple):
+                return tuple(serialize_pydantic(item) for item in obj)
+            
+            # 对于其他类型，尝试转换为字符串
+            try:
+                return str(obj)
+            except:
+                return None
+        
+        # 构建响应（兼容原有格式，同时支持新格式）
+        # 先序列化result，确保所有Pydantic对象都被转换
+        try:
+            if hasattr(result, 'model_dump'):
+                result_dict = result.model_dump()
+            elif hasattr(result, 'dict'):
+                result_dict = result.dict()
+            else:
+                result_dict = serialize_pydantic(result)
+        except Exception as e:
+            logger.warning(f"序列化result失败，使用备用方法: {str(e)}")
+            result_dict = {
+                "source_cards": result.source_cards if hasattr(result, 'source_cards') else [],
+                "synthesis_insight": serialize_pydantic(result.synthesis_insight) if hasattr(result, 'synthesis_insight') else {},
+                "new_views": [],
+                "card_analysis": serialize_pydantic(result.card_analysis) if hasattr(result, 'card_analysis') else {}
+            }
+        
+        # 构建new_views列表，确保数据格式正确
+        logger.info(f"📊 开始处理 {len(result.new_views)} 个新视图")
+        new_views_list = []
+        for view in result.new_views:
+            try:
+                # 序列化visualization_response
+                viz_data = serialize_pydantic(view.visualization_response) if hasattr(view, 'visualization_response') else {}
+                
+                # 确保viz_data有正确的结构
+                if not isinstance(viz_data, dict):
+                    viz_data = {}
+                
+                # 设置has_visualization标志
+                if viz_data:
+                    viz_data['has_visualization'] = True
+                    # 确定visualization_type
+                    if 'chart_config' in viz_data and viz_data['chart_config']:
+                        viz_data['visualization_type'] = 'plotly'
+                    elif 'timeline_data' in viz_data:
+                        viz_data['visualization_type'] = 'timeline'
+                    elif 'table' in viz_data:
+                        viz_data['visualization_type'] = 'table'
+                    else:
+                        viz_data['visualization_type'] = 'plotly'  # 默认
+                else:
+                    viz_data['has_visualization'] = False
+                
+                # 确保chart_config被正确序列化
+                if isinstance(viz_data, dict) and 'chart_config' in viz_data:
+                    if viz_data['chart_config'] and not isinstance(viz_data['chart_config'], dict):
+                        viz_data['chart_config'] = serialize_pydantic(viz_data['chart_config'])
+                
+                # 提取洞察信息（从synthesis_insight或view中）
+                insight_data = None
+                if hasattr(result, 'synthesis_insight') and result.synthesis_insight:
+                    synthesis_insight = serialize_pydantic(result.synthesis_insight)
+                    insight_data = {
+                        "conclusion": synthesis_insight.get("conclusion", ""),
+                        "key_findings": synthesis_insight.get("key_findings", []),
+                        "confidence": synthesis_insight.get("confidence", "medium")
+                    }
+                
+                new_views_list.append({
+                    "view_id": view.view_id if hasattr(view, 'view_id') else f"view_{len(new_views_list)}",
+                    "view_type": view.view_type if hasattr(view, 'view_type') else "verify",
+                    "visualization": viz_data,
+                    "description": view.description if hasattr(view, 'description') else "",
+                    "data_quality": view.data_validation.get("data_quality") if hasattr(view, 'data_validation') and isinstance(view.data_validation, dict) else "unknown",
+                    "related_cards": view.related_cards if hasattr(view, 'related_cards') else [],
+                    "insight": insight_data  # ⭐新增：洞察信息
+                })
+                logger.info(f"✅ 成功添加视图: {view.view_id if hasattr(view, 'view_id') else 'unknown'}, has_visualization={viz_data.get('has_visualization', False)}")
+            except Exception as e:
+                logger.warning(f"序列化视图失败，跳过: {str(e)}")
+                import traceback
+                logger.warning(f"详细错误: {traceback.format_exc()}")
+                continue
+        
+        logger.info(f"📊 最终生成 {len(new_views_list)} 个新视图（原始: {len(result.new_views)}）")
+        
+        response_data = {
+            "status": "success",
+            "linkage_result": result_dict,
+            "new_views": new_views_list,
+            "synthesis_insight": serialize_pydantic(result.synthesis_insight) if hasattr(result, 'synthesis_insight') else {},
+            "card_analysis": serialize_pydantic(result.card_analysis) if hasattr(result, 'card_analysis') else {}
         }
         
-        logger.info("✅ 综合能力分析生成成功")
+        # 兼容原有格式：如果只有一个视图，可以作为visualization返回
+        if len(result.new_views) == 1:
+            view = result.new_views[0]
+            if view.visualization_response and view.visualization_response.chart_config:
+                chart_config_dict = serialize_pydantic(view.visualization_response.chart_config) if view.visualization_response.chart_config else None
+                response_data["visualization"] = {
+                    "has_visualization": True,
+                    "chart_config": chart_config_dict,
+                    "analysis_text": view.visualization_response.answer if hasattr(view.visualization_response, 'answer') else ""
+                }
+        
+        logger.info(f"✅ 综合视图分析生成成功，生成了{len(result.new_views)}个新视图")
         
         return JSONResponse(
             status_code=200,
-            content={
-                "status": "success",
-                "visualization": visualization_response
-            }
+            content=response_data
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"生成综合能力分析失败: {str(e)}")
+        logger.error(f"生成综合视图分析失败: {str(e)}")
         import traceback
         logger.error(f"详细错误: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"生成综合能力分析失败: {str(e)}"
-        )
+        
+        # 降级：尝试使用原有的雷达图生成（如果可能）
+        try:
+            logger.info("尝试使用原有方法生成雷达图作为降级方案...")
+            # 这里可以调用原有的逻辑作为降级
+            raise HTTPException(
+                status_code=500,
+                detail=f"生成综合视图分析失败: {str(e)}"
+            )
+        except:
+            raise HTTPException(
+                status_code=500,
+                detail=f"生成综合视图分析失败: {str(e)}"
+            )
 
 
 # ==================== 综合能力分析辅助函数 ====================

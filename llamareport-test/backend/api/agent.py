@@ -132,6 +132,10 @@ class GenerateSectionRequest(BaseModel):
 class AgentQueryRequest(BaseModel):
     """Agent 查询请求"""
     question: str = Field(description="用户问题")
+    query_type: Optional[str] = Field(
+        default="general",
+        description="查询类型: 'general' (通用查询，输入框输入) 或 'section' (章节生成，按钮点击)"
+    )
 
 
 class VisualizationFromTextRequest(BaseModel):
@@ -259,7 +263,8 @@ async def agent_query(request: AgentQueryRequest):
     }
     """
     try:
-        logger.info(f"收到 Agent 查询: {request.question[:50]}...")
+        query_type = request.query_type or "general"
+        logger.info(f"收到 Agent 查询 (类型: {query_type}): {request.question[:50]}...")
         
         # 获取 Agent
         agent = get_report_agent()
@@ -269,7 +274,7 @@ async def agent_query(request: AgentQueryRequest):
         start_time = time.time()
         try:
             result = await asyncio.wait_for(
-                agent.query(request.question),
+                agent.query(request.question, query_type=query_type),
                 timeout=600.0  # 10分钟整体超时
             )
             elapsed_time = time.time() - start_time

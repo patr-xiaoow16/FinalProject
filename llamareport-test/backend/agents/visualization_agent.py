@@ -87,9 +87,9 @@ class VisualizationAgent:
             question_type = self._classify_question_type(query, answer)
             logger.warning(f"🔍 [DEBUG] 问题类型分类结果: {question_type}")
             
-            # 3. 提取数据（传递问题类型以优化提取）
-            extracted_data = await self._extract_data_from_answer(query, answer, sources, question_type=question_type)
-            logger.warning(f"🔍 [DEBUG] 数据提取结果: has_data={extracted_data.get('has_data') if extracted_data else None}, data_type={extracted_data.get('data_type') if extracted_data else None}")
+            # 3. 提取数据（传递问题类型以优化提取，启用多数据集提取）
+            extracted_data = await self._extract_data_from_answer(query, answer, sources, question_type=question_type, extract_multiple=True)
+            logger.warning(f"🔍 [DEBUG] 数据提取结果: has_data={extracted_data.get('has_data') if extracted_data else None}, data_type={extracted_data.get('data_type') if extracted_data else None}, multiple={extracted_data.get('multiple') if extracted_data else False}")
             
             if not extracted_data or not extracted_data.get('has_data'):
                 logger.warning(f"⚠️ [DEBUG] 数据提取失败，extracted_data: {extracted_data}")
@@ -100,6 +100,91 @@ class VisualizationAgent:
                     has_visualization=False
                 )
             
+            # 检查是否有多个数据集
+            if extracted_data.get('multiple') and extracted_data.get('datasets'):
+                datasets = extracted_data['datasets']
+                logger.info(f"📊 检测到 {len(datasets)} 个数据集，将为每个数据集生成独立视图")
+                
+                from models.visualization_models import SingleVisualization
+                visualizations = []
+                
+                # 为每个数据集生成视图
+                for idx, dataset in enumerate(datasets):
+                    logger.info(f"📈 处理数据集 {idx + 1}/{len(datasets)}: {dataset.get('title', '未命名')}")
+                    
+                    # 为每个数据集推荐图表类型
+                    dataset_recommendation = await self._recommend_chart_type(
+                        query,
+                        dataset,
+                        answer=answer,
+                        question_type=question_type
+                    )
+                    
+                    # 检查是否需要生成时间轴
+                    dataset_timeline_data = None
+                    dataset_visualization_type = "plotly"
+                    
+                    # 如果是过程与变化类问题，且检测到时间轴示例，生成Timeline数据
+                    if question_type == 'process':
+                        example = self._get_visualization_example(question_type, dataset_recommendation.recommended_chart_type, query)
+                        if example and example.get('type') == 'timeline':
+                            from agents.timeline_generator import generate_timeline_data
+                            dataset_timeline_data = await generate_timeline_data(self.llm, query, answer, dataset, sources)
+                            if dataset_timeline_data:
+                                dataset_visualization_type = "timeline"
+                                dataset_recommendation = ChartRecommendation(
+                                    recommended_chart_type=ChartType.LINE,
+                                    reason="过程与变化类问题，使用时间轴展示关键事件的时间序列",
+                                    data_characteristics=dataset_recommendation.data_characteristics,
+                                    alternative_charts=dataset_recommendation.alternative_charts
+                                )
+                    
+                    # 生成图表配置
+                    dataset_chart_config = None
+                    if dataset_visualization_type == "plotly":
+                        dataset_chart_config = await self._generate_chart_config(
+                            dataset_recommendation.recommended_chart_type,
+                            dataset,
+                            query,
+                            question_type=question_type
+                        )
+                    
+                    # 生成洞察
+                    dataset_insights = await self._generate_insights(
+                        dataset,
+                        dataset_recommendation.recommended_chart_type
+                    )
+                    
+                    # 创建单个视图
+                    single_viz = SingleVisualization(
+                        chart_config=dataset_chart_config,
+                        timeline_data=dataset_timeline_data,
+                        visualization_type=dataset_visualization_type,
+                        recommendation=dataset_recommendation,
+                        insights=dataset_insights,
+                        title=dataset.get('title', f"视图 {idx + 1}"),
+                        description=dataset.get('description', None)
+                    )
+                    visualizations.append(single_viz)
+                    logger.info(f"✅ 数据集 {idx + 1} 视图生成成功: {dataset_visualization_type}")
+                
+                # 返回多个视图（向后兼容：使用第一个视图的数据）
+                first_viz = visualizations[0] if visualizations else None
+                return VisualizationResponse(
+                    query=query,
+                    answer=answer,
+                    has_visualization=True,
+                    visualizations=visualizations,
+                    # 向后兼容字段
+                    chart_config=first_viz.chart_config if first_viz else None,
+                    timeline_data=first_viz.timeline_data if first_viz else None,
+                    visualization_type=first_viz.visualization_type if first_viz else "plotly",
+                    recommendation=first_viz.recommendation if first_viz else None,
+                    insights=first_viz.insights if first_viz else None,
+                    confidence_score=0.85
+                )
+            
+            # 单个数据集处理（向后兼容原有逻辑）
             # 4. 推荐图表类型（增强版：同时考量问题和回答）
             recommendation = await self._recommend_chart_type(
                 query, 
@@ -160,10 +245,24 @@ class VisualizationAgent:
             
             logger.info(f"✅ 可视化生成成功: {visualization_type} (推荐类型: {recommendation.recommended_chart_type.value})")
             
+            # 单个视图也包装成列表（保持一致性）
+            from models.visualization_models import SingleVisualization
+            single_viz = SingleVisualization(
+                chart_config=chart_config,
+                timeline_data=timeline_data,
+                visualization_type=visualization_type,
+                recommendation=recommendation,
+                insights=insights,
+                title=None,
+                description=None
+            )
+            
             return VisualizationResponse(
                 query=query,
                 answer=answer,
                 has_visualization=True,
+                visualizations=[single_viz],  # 单个视图也放在列表中
+                # 向后兼容字段
                 chart_config=chart_config,  # Timeline类型时为None
                 timeline_data=timeline_data,
                 visualization_type=visualization_type,
@@ -301,7 +400,8 @@ class VisualizationAgent:
                 '趋势', '对比', '比较', '增长', '下降', '变化',
                 '分布', '占比', '份额', '排名', '图表', '可视化',
                 '多少', '如何', '怎样', '数据', '指标', '财务',
-                '收入', '利润', '资产', '负债', '资产总额'
+                '收入', '利润', '资产', '负债', '资产总额', '分析',
+                '情况', '状况', '表现', '业绩', '营收', '净利润'
             ]
             
             query_lower = query.lower()
@@ -309,6 +409,15 @@ class VisualizationAgent:
             
             # 检查回答中是否包含数字
             has_numbers = bool(re.search(r'\d+\.?\d*', answer))
+            
+            # 检查回答中是否包含财务相关关键词（即使没有数字）
+            financial_keywords_in_answer = [
+                '营业收入', '净利润', '资产', '负债', 'ROE', 'ROA', 
+                '毛利率', '净利率', '现金流', '股东权益', '总资产',
+                '净资产', '营业收入', '营业成本', '营业利润'
+            ]
+            answer_lower = answer.lower()
+            has_financial_keywords = any(keyword in answer_lower for keyword in financial_keywords_in_answer)
             
             # 检查回答长度
             answer_length = len(answer)
@@ -320,10 +429,20 @@ class VisualizationAgent:
                 logger.info(f"非数据类问题({question_type})，允许生成视图: {needs_viz} (长度:{answer_length})")
                 return needs_viz
             
-            # 数据类：保持原有逻辑
-            needs_viz = (has_viz_keyword or has_numbers) and answer_length > 50
+            # 数据类：增强判断逻辑
+            # 如果问题包含"分析"、"财务"、"情况"等关键词，且回答包含财务关键词，即使没有数字也允许可视化
+            analysis_keywords = ['分析', '财务', '情况', '状况', '表现', '业绩']
+            has_analysis_query = any(keyword in query_lower for keyword in analysis_keywords)
             
-            logger.info(f"可视化需求分析: {needs_viz} (类型:{question_type}, 关键词:{has_viz_keyword}, 数字:{has_numbers}, 长度:{answer_length})")
+            if has_analysis_query and has_financial_keywords:
+                needs_viz = answer_length > 50
+                logger.info(f"分析类问题且包含财务关键词，允许生成视图: {needs_viz} (长度:{answer_length})")
+                return needs_viz
+            
+            # 原有逻辑：关键词或数字
+            needs_viz = (has_viz_keyword or has_numbers or has_financial_keywords) and answer_length > 50
+            
+            logger.info(f"可视化需求分析: {needs_viz} (类型:{question_type}, 关键词:{has_viz_keyword}, 数字:{has_numbers}, 财务关键词:{has_financial_keywords}, 长度:{answer_length})")
             
             return needs_viz
             
@@ -338,7 +457,8 @@ class VisualizationAgent:
         query: str,
         answer: str,
         sources: Optional[List[Dict]] = None,
-        question_type: Optional[str] = None
+        question_type: Optional[str] = None,
+        extract_multiple: bool = True
     ) -> Dict[str, Any]:
         """
         从回答和来源中提取数据（优先从sources中的表格数据提取）
@@ -347,9 +467,11 @@ class VisualizationAgent:
             query: 用户查询
             answer: 文本回答
             sources: 数据来源
+            question_type: 问题类型
+            extract_multiple: 是否提取多个数据集（默认True）
         
         Returns:
-            Dict: 提取的数据
+            Dict: 提取的数据（如果extract_multiple=True，可能包含datasets字段，每个数据集一个视图）
         """
         try:
             # 1. 优先从sources中提取表格数据
@@ -445,7 +567,101 @@ nodes: ["业务收入", "零售业务", "对公业务", "其他业务", "成本"
 links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
 """
             
-            prompt = f"""
+            # 根据extract_multiple参数决定是否提取多个数据集
+            if extract_multiple:
+                prompt = f"""
+分析以下查询和回答，提取可用于可视化的数据。**重要：如果回答中包含多个不同的数据主题或指标，请为每个主题/指标提取一个独立的数据集。**
+
+查询: {query}
+
+回答: {answer}
+
+{sources_info}
+{example_guidance}
+{risk_data_format}
+【重要提示】
+1. **多数据集提取**：如果回答中包含多个不同的数据主题（如"营业收入"和"净利润"、"利息收入"和"非利息收入"、"零售业务"和"批发业务"等），请为每个主题提取一个独立的数据集
+2. 如果查询涉及"营业收入"、"收入"等指标，必须从回答和来源中提取具体的历史数据
+3. 如果回答中只提到单个数值，尝试从sources中查找历史数据（如最近3-5年的数据）
+4. 如果查询要求"趋势"、"变化"、"增长"，必须提取时间序列数据
+5. 如果查询涉及"关键事件"、"时间轴"，需要提取时间点和事件描述的对应关系
+6. 如果查询涉及"风险"，必须提取风险名称列表，并尽量量化概率和影响程度（1-5分）
+7. 如果查询涉及"业务结构"，需要提取业务名称和对应的占比/数值
+8. 数值单位要准确识别（元、万元、亿元、%等）
+
+【数据类型判断规则】
+- time_series（时间序列）：数据包含时间维度（年份、月份、季度等），适合展示趋势变化
+- comparison（对比）：数据是不同类别或项目的对比，没有明显时间维度，适合展示差异
+- distribution（分布/占比）：数据表示占比、比例、结构分布，总和通常为100%或接近100%，适合展示构成
+- single_value（单一指标）：只有一个数值，适合展示关键指标
+- table（表格）：复杂表格数据
+
+请提取以下信息（以JSON格式返回）：
+- 如果只有一个数据集：
+{{
+    "has_data": true,
+    "data_type": "time_series",  // 根据数据特征选择：time_series/comparison/distribution/single_value
+    "labels": ["2021年", "2022年", "2023年"],
+    "values": [100, 120, 150],
+    "unit": "亿元",
+    "time_period": "年度"
+}}
+
+- 如果有多个数据集（推荐）：
+{{
+    "has_data": true,
+    "datasets": [
+        {{
+            "title": "营业收入趋势",
+            "data_type": "time_series",  // 时间序列数据，使用折线图
+            "labels": ["2021年", "2022年", "2023年"],
+            "values": [100, 120, 150],
+            "unit": "亿元",
+            "time_period": "年度"
+        }},
+        {{
+            "title": "净利润趋势",
+            "data_type": "time_series",  // 时间序列数据，使用折线图
+            "labels": ["2021年", "2022年", "2023年"],
+            "values": [20, 25, 30],
+            "unit": "亿元",
+            "time_period": "年度"
+        }},
+        {{
+            "title": "收入结构",
+            "data_type": "distribution",  // 占比数据，使用饼图
+            "labels": ["利息收入", "非利息收入"],
+            "values": [60, 40],
+            "unit": "%"
+        }},
+        {{
+            "title": "业务板块对比",
+            "data_type": "comparison",  // 对比数据，使用柱状图
+            "labels": ["零售业务", "批发业务", "其他业务"],
+            "values": [712.55, 638.41, 115.99],
+            "unit": "亿元"
+        }}
+    ]
+}}
+
+- 如果是风险数据：
+{{
+    "has_data": true,
+    "data_type": "risk_matrix",
+    "risks": [
+        {{"name": "信用风险", "probability": 4, "impact": 5}},
+        {{"name": "市场风险", "probability": 3, "impact": 4}},
+        {{"name": "操作风险", "probability": 2, "impact": 3}}
+    ]
+}}
+
+如果无法提取数据，返回：
+{{
+    "has_data": false
+}}
+"""
+            else:
+                prompt = f"""
 分析以下查询和回答，提取可用于可视化的数据。
 
 查询: {query}
@@ -513,9 +729,20 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
                 json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
                 if json_match:
                     data = json.loads(json_match.group())
-                    data_type = data.get('data_type', 'unknown')
                     has_data = data.get('has_data', False)
                     
+                    # 检查是否有多个数据集
+                    if 'datasets' in data and isinstance(data['datasets'], list) and len(data['datasets']) > 0:
+                        logger.info(f"📊 检测到 {len(data['datasets'])} 个数据集，将生成多个视图")
+                        # 返回包含多个数据集的数据结构
+                        return {
+                            'has_data': True,
+                            'datasets': data['datasets'],
+                            'multiple': True
+                        }
+                    
+                    # 单个数据集（向后兼容）
+                    data_type = data.get('data_type', 'unknown')
                     logger.info(f"📊 解析后的数据: data_type={data_type}, has_data={has_data}, keys={list(data.keys())}")
                     logger.info(f"🔍 问题类型: {question_type}, data_type: {data_type}, has_data: {has_data}")
                     logger.warning(f"🔍 [DEBUG] 问题类型检查: question_type='{question_type}', type={type(question_type)}")
@@ -950,7 +1177,17 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
             data_type = data.get('data_type', 'unknown')
             
             # ========== 第一步：分析回答内容特征 ==========
-            answer_features = self._analyze_answer_features(answer, query) if answer else {}
+            # 注意：_analyze_answer_features 方法可能不存在，使用 try-except 保护
+            answer_features = {}
+            if answer:
+                try:
+                    if hasattr(self, '_analyze_answer_features'):
+                        answer_features = self._analyze_answer_features(answer, query)
+                    else:
+                        # 如果方法不存在，跳过特征分析
+                        logger.warning("_analyze_answer_features 方法不存在，跳过回答内容特征分析")
+                except Exception as feature_error:
+                    logger.warning(f"分析回答内容特征失败: {str(feature_error)}")
             logger.info(f"📊 回答内容特征: {answer_features}")
             
             # 特殊处理：风险矩阵数据
@@ -963,7 +1200,68 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
                     alternative_charts=[ChartType.HEATMAP]
                 )
             
-            # 第一步：基于问题类型推荐（优先）
+            # 获取数据特征
+            labels = data.get('labels', [])
+            values = data.get('values', [])
+            series = data.get('series', [])
+            data_count = len(values) if values else 0
+            has_multiple_series = series and len(series) > 0
+            
+            # 第一步：基于数据类型的智能推荐（优先级最高）
+            data_based_type = None
+            
+            # 根据数据类型和数据特征智能选择
+            if data_type == 'distribution':
+                # 分布类型：优先饼图，如果数据点过多（>8）则用柱状图
+                if data_count > 0 and data_count <= 8:
+                    data_based_type = ChartType.PIE
+                else:
+                    data_based_type = ChartType.BAR
+            elif data_type == 'comparison':
+                # 对比类型：根据数据点数量和数据特征选择
+                if has_multiple_series:
+                    # 多个系列：使用分组柱状图
+                    data_based_type = ChartType.GROUPED_BAR
+                elif data_count > 0 and data_count <= 5:
+                    # 少量数据点：使用柱状图
+                    data_based_type = ChartType.BAR
+                else:
+                    # 较多数据点：使用柱状图
+                    data_based_type = ChartType.BAR
+            elif data_type == 'time_series':
+                # 时间序列：根据数据点数量和数据特征选择
+                if has_multiple_series:
+                    # 多个系列：使用多折线图
+                    data_based_type = ChartType.MULTI_LINE
+                elif data_count > 0 and data_count <= 10:
+                    # 少量数据点：可以使用折线图或柱状图
+                    # 如果问题类型是 'data'，优先折线图；如果是 'comparison'，优先柱状图
+                    if question_type == 'comparison':
+                        data_based_type = ChartType.BAR
+                    else:
+                        data_based_type = ChartType.LINE
+                else:
+                    # 较多数据点：优先折线图
+                    data_based_type = ChartType.LINE
+            elif data_type == 'single_value':
+                data_based_type = ChartType.GAUGE
+            elif data_type == 'table':
+                data_based_type = ChartType.TABLE
+            elif data_type == 'risk_matrix':
+                data_based_type = ChartType.SCATTER
+            else:
+                # 未知类型：根据数据特征推断
+                if data_count == 1:
+                    data_based_type = ChartType.GAUGE
+                elif data_count <= 8 and all(isinstance(v, (int, float)) and 0 <= v <= 100 for v in values if values):
+                    # 可能是百分比数据，使用饼图
+                    data_based_type = ChartType.PIE
+                elif has_multiple_series:
+                    data_based_type = ChartType.GROUPED_BAR
+                else:
+                    data_based_type = ChartType.BAR
+            
+            # 第二步：基于问题类型的推荐（作为备选）
             question_based_type = None
             if question_type in VIEW_RECOMMENDATION_MAP:
                 view_config = VIEW_RECOMMENDATION_MAP[question_type]
@@ -971,7 +1269,6 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
                 if chart_types:
                     # 对于过程与变化类，优先推荐LINE图（可用于时间轴）
                     if question_type == 'process':
-                        # 过程类问题优先使用LINE图表示时间轴
                         if ChartType.LINE in chart_types:
                             question_based_type = ChartType.LINE
                         else:
@@ -982,70 +1279,167 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
                             question_based_type = ChartType.SCATTER
                         else:
                             question_based_type = chart_types[0]
-                    # 根据数据特征选择最合适的图表类型
-                    elif data_type == 'time_series' and ChartType.LINE in chart_types:
-                        question_based_type = ChartType.LINE
-                    elif data_type == 'comparison' and ChartType.BAR in chart_types:
-                        question_based_type = ChartType.BAR
-                    elif data_type == 'distribution' and ChartType.PIE in chart_types:
-                        question_based_type = ChartType.PIE
+                    # 对于结构类，优先推荐PIE图（占比分析）
+                    elif question_type == 'structure':
+                        if ChartType.PIE in chart_types and data_type == 'distribution':
+                            question_based_type = ChartType.PIE
+                        elif ChartType.BAR in chart_types:
+                            question_based_type = ChartType.BAR
+                        else:
+                            question_based_type = chart_types[0]
+                    # 对于结论类，优先推荐GAUGE或PIE
+                    elif question_type == 'conclusion':
+                        if ChartType.GAUGE in chart_types and data_count == 1:
+                            question_based_type = ChartType.GAUGE
+                        elif ChartType.PIE in chart_types and data_type == 'distribution':
+                            question_based_type = ChartType.PIE
+                        else:
+                            question_based_type = chart_types[0] if chart_types else None
+                    # 对于对比类，优先推荐BAR图
+                    elif question_type == 'comparison':
+                        if ChartType.BAR in chart_types:
+                            question_based_type = ChartType.BAR
+                        else:
+                            question_based_type = chart_types[0]
+                    # 对于数据类，根据数据特征选择
+                    elif question_type == 'data':
+                        # 如果数据类型是 time_series，优先 LINE；如果是 comparison，优先 BAR
+                        if data_type == 'time_series' and ChartType.LINE in chart_types:
+                            question_based_type = ChartType.LINE
+                        elif data_type == 'comparison' and ChartType.BAR in chart_types:
+                            question_based_type = ChartType.BAR
+                        elif data_type == 'distribution' and ChartType.PIE in chart_types:
+                            question_based_type = ChartType.PIE
+                        else:
+                            question_based_type = chart_types[0]
                     else:
-                        # 默认选择第一个推荐的图表类型
                         question_based_type = chart_types[0]
             
-            # 第二步：基于数据类型的规则（保持向后兼容）
-            type_mapping = {
-                'time_series': ChartType.LINE,
-                'comparison': ChartType.BAR,
-                'distribution': ChartType.PIE,
-                'single_value': ChartType.GAUGE,
-                'table': ChartType.TABLE
-            }
+            # 第三步：综合推荐（优先使用数据类型推荐，如果与问题类型推荐冲突，则根据具体情况选择）
+            if data_based_type:
+                recommended_type = data_based_type
+                # 如果问题类型推荐与数据类型推荐不同，且问题类型推荐更合适，则使用问题类型推荐
+                if question_based_type and question_based_type != data_based_type:
+                    # 特殊情况：如果数据类型是 distribution 但问题类型是 structure，优先使用 PIE
+                    if data_type == 'distribution' and question_type == 'structure' and question_based_type == ChartType.PIE:
+                        recommended_type = ChartType.PIE
+                    # 特殊情况：如果数据类型是 time_series 但问题类型是 comparison，使用 BAR
+                    elif data_type == 'time_series' and question_type == 'comparison' and question_based_type == ChartType.BAR:
+                        recommended_type = ChartType.BAR
+                    # 其他情况：优先使用数据类型推荐
+            elif question_based_type:
+                recommended_type = question_based_type
+            else:
+                # 最后的回退
+                recommended_type = ChartType.BAR
             
-            data_based_type = type_mapping.get(data_type, ChartType.BAR)
-            
-            # 第三步：综合推荐（优先使用问题类型推荐，如果没有则使用数据类型推荐）
-            recommended_type = question_based_type if question_based_type else data_based_type
-            
-            # 生成推荐理由
+            # 生成推荐理由（更详细）
             reason_parts = []
+            
+            # 添加数据类型说明
+            data_type_descriptions = {
+                'time_series': '时间序列数据',
+                'comparison': '对比数据',
+                'distribution': '分布/占比数据',
+                'single_value': '单一指标',
+                'table': '表格数据',
+                'risk_matrix': '风险矩阵数据'
+            }
+            data_desc = data_type_descriptions.get(data_type, f'数据类型：{data_type}')
+            reason_parts.append(data_desc)
+            
+            # 添加数据特征说明
+            if data_count > 0:
+                if data_count == 1:
+                    reason_parts.append('单一数据点')
+                elif data_count <= 5:
+                    reason_parts.append(f'{data_count}个数据点')
+                else:
+                    reason_parts.append(f'{data_count}个数据点')
+            
+            if has_multiple_series:
+                reason_parts.append('多系列数据')
+            
+            # 添加图表类型说明
+            chart_type_descriptions = {
+                ChartType.LINE: '折线图适合展示趋势变化',
+                ChartType.BAR: '柱状图适合展示对比分析',
+                ChartType.PIE: '饼图适合展示占比分布',
+                ChartType.GAUGE: '仪表盘适合展示单一指标',
+                ChartType.SCATTER: '散点图适合展示风险矩阵',
+                ChartType.MULTI_LINE: '多折线图适合展示多指标趋势',
+                ChartType.GROUPED_BAR: '分组柱状图适合展示多系列对比',
+                ChartType.AREA: '面积图适合展示累积趋势',
+                ChartType.HEATMAP: '热力图适合展示相关性'
+            }
+            chart_desc = chart_type_descriptions.get(recommended_type, f'推荐{recommended_type.value}图表')
+            reason_parts.append(chart_desc)
+            
+            # 添加问题类型说明（如果有）
             if question_type in VIEW_RECOMMENDATION_MAP:
                 view_config = VIEW_RECOMMENDATION_MAP[question_type]
                 reason_parts.append(f"问题类型：{view_config['description']}")
-            reason_parts.append(f"数据类型：{data_type}")
-            reason = "；".join(reason_parts) if reason_parts else f"基于数据类型'{data_type}'推荐"
+            
+            reason = "；".join(reason_parts) if reason_parts else f"基于数据类型'{data_type}'推荐{recommended_type.value}"
             
             # 备选图表（结合问题类型和数据类型的备选）
             alternatives = []
+            
+            # 根据推荐类型添加相关备选
+            if recommended_type == ChartType.LINE:
+                alternatives.extend([ChartType.AREA, ChartType.BAR, ChartType.MULTI_LINE])
+            elif recommended_type == ChartType.BAR:
+                alternatives.extend([ChartType.LINE, ChartType.GROUPED_BAR, ChartType.STACKED_BAR])
+            elif recommended_type == ChartType.PIE:
+                alternatives.extend([ChartType.BAR, ChartType.FUNNEL, ChartType.STACKED_BAR])
+            elif recommended_type == ChartType.GAUGE:
+                alternatives.extend([ChartType.BAR, ChartType.PIE])
+            elif recommended_type == ChartType.SCATTER:
+                alternatives.extend([ChartType.HEATMAP, ChartType.BAR])
+            elif recommended_type == ChartType.MULTI_LINE:
+                alternatives.extend([ChartType.GROUPED_BAR, ChartType.LINE, ChartType.AREA])
+            elif recommended_type == ChartType.GROUPED_BAR:
+                alternatives.extend([ChartType.MULTI_LINE, ChartType.STACKED_BAR, ChartType.BAR])
+            
+            # 添加基于问题类型的备选
             if question_type in VIEW_RECOMMENDATION_MAP:
                 view_config = VIEW_RECOMMENDATION_MAP[question_type]
-                alternatives.extend(view_config['chart_types'])
+                for alt_type in view_config['chart_types']:
+                    if alt_type != recommended_type and alt_type not in alternatives:
+                        alternatives.append(alt_type)
             
             # 添加基于数据类型的备选
             data_alternatives = {
-                'time_series': [ChartType.AREA, ChartType.MULTI_LINE],
-                'comparison': [ChartType.GROUPED_BAR, ChartType.LINE],
-                'distribution': [ChartType.BAR, ChartType.FUNNEL],
-                'table': [ChartType.HEATMAP]
+                'time_series': [ChartType.AREA, ChartType.MULTI_LINE, ChartType.BAR],
+                'comparison': [ChartType.GROUPED_BAR, ChartType.LINE, ChartType.STACKED_BAR],
+                'distribution': [ChartType.BAR, ChartType.FUNNEL, ChartType.STACKED_BAR],
+                'table': [ChartType.HEATMAP, ChartType.BAR]
             }
-            alternatives.extend(data_alternatives.get(data_type, []))
+            for alt_type in data_alternatives.get(data_type, []):
+                if alt_type != recommended_type and alt_type not in alternatives:
+                    alternatives.append(alt_type)
             
             # 去重并移除已推荐的类型
             alternatives = [alt for alt in set(alternatives) if alt != recommended_type]
             
-            logger.info(f"图表推荐: {recommended_type.value} (问题类型: {question_type}, 数据类型: {data_type})")
+            logger.info(f"📊 图表推荐: {recommended_type.value} (问题类型: {question_type}, 数据类型: {data_type}, 数据点数: {data_count}, 多系列: {has_multiple_series})")
             
             return ChartRecommendation(
                 recommended_chart_type=recommended_type,
                 reason=reason,
-                data_characteristics=f"问题类型: {question_type}, 数据类型: {data_type}, 数据点数: {len(data.get('values', []))}",
+                data_characteristics=f"问题类型: {question_type}, 数据类型: {data_type}, 数据点数: {data_count}, 多系列: {has_multiple_series}",
                 alternative_charts=alternatives[:3]  # 最多返回3个备选
             )
             
         except Exception as e:
             logger.error(f"推荐图表类型失败: {str(e)}")
-            # 出错时回退到原有逻辑
+            import traceback
+            logger.error(f"推荐图表类型错误堆栈:\n{traceback.format_exc()}")
+            
+            # 出错时回退到原有逻辑，但提供更详细的推荐理由
             data_type = data.get('data_type', 'unknown')
+            question_type = question_type or 'unknown'
+            
             type_mapping = {
                 'time_series': ChartType.LINE,
                 'comparison': ChartType.BAR,
@@ -1053,10 +1447,22 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
                 'single_value': ChartType.GAUGE,
                 'table': ChartType.TABLE
             }
+            
+            recommended_type = type_mapping.get(data_type, ChartType.BAR)
+            
+            # 生成更详细的推荐理由（即使出错也提供有用信息）
+            reason_parts = []
+            if question_type and question_type != 'unknown':
+                reason_parts.append(f"问题类型: {question_type}")
+            reason_parts.append(f"数据类型: {data_type}")
+            reason_parts.append(f"推荐图表: {recommended_type.value}")
+            
+            reason = "；".join(reason_parts) if reason_parts else f"基于数据类型'{data_type}'推荐{recommended_type.value}"
+            
             return ChartRecommendation(
-                recommended_chart_type=type_mapping.get(data_type, ChartType.BAR),
-                reason="默认推荐（出错回退）",
-                data_characteristics=f"数据类型: {data_type}"
+                recommended_chart_type=recommended_type,
+                reason=reason,
+                data_characteristics=f"数据类型: {data_type}, 问题类型: {question_type}"
             )
 
     def _get_visualization_example(self, question_type: str, chart_type: ChartType, query: str) -> Optional[Dict]:

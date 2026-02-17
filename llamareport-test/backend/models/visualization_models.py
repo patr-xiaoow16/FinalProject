@@ -158,14 +158,9 @@ class VisualizationInsight(BaseModel):
 
 # ==================== 完整的可视化响应模型 ====================
 
-class VisualizationResponse(BaseModel):
-    """完整的可视化响应"""
-    # 基本信息
-    query: str = Field(description="原始查询")
-    answer: str = Field(description="文本回答")
-    
+class SingleVisualization(BaseModel):
+    """单个可视化视图"""
     # 图表配置
-    has_visualization: bool = Field(description="是否包含可视化")
     chart_config: Optional[PlotlyChartConfig] = Field(
         default=None,
         description="Plotly图表配置"
@@ -178,7 +173,7 @@ class VisualizationResponse(BaseModel):
     )
     
     # 可视化类型（plotly或timeline）
-    visualization_type: Optional[str] = Field(
+    visualization_type: str = Field(
         default="plotly",
         description="可视化类型：plotly或timeline"
     )
@@ -189,16 +184,67 @@ class VisualizationResponse(BaseModel):
         description="简化的图表配置"
     )
     
+    # 推荐
+    recommendation: Optional[ChartRecommendation] = Field(
+        default=None,
+        description="图表推荐"
+    )
+    
     # 洞察
     insights: Optional[List[VisualizationInsight]] = Field(
         default=None,
         description="可视化洞察列表"
     )
     
-    # 推荐
+    # 标题和描述
+    title: Optional[str] = Field(default=None, description="视图标题")
+    description: Optional[str] = Field(default=None, description="视图描述")
+
+
+class VisualizationResponse(BaseModel):
+    """完整的可视化响应（支持多个视图）"""
+    # 基本信息
+    query: str = Field(description="原始查询")
+    answer: str = Field(description="文本回答")
+    
+    # 是否包含可视化
+    has_visualization: bool = Field(description="是否包含可视化")
+    
+    # 单个视图（向后兼容）
+    chart_config: Optional[PlotlyChartConfig] = Field(
+        default=None,
+        description="Plotly图表配置（向后兼容，已废弃，请使用visualizations）"
+    )
+    
+    timeline_data: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="时间轴数据（向后兼容，已废弃，请使用visualizations）"
+    )
+    
+    visualization_type: Optional[str] = Field(
+        default="plotly",
+        description="可视化类型（向后兼容，已废弃，请使用visualizations）"
+    )
+    
+    simple_chart: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="简化的图表配置（向后兼容，已废弃，请使用visualizations）"
+    )
+    
     recommendation: Optional[ChartRecommendation] = Field(
         default=None,
-        description="图表推荐"
+        description="图表推荐（向后兼容，已废弃，请使用visualizations）"
+    )
+    
+    insights: Optional[List[VisualizationInsight]] = Field(
+        default=None,
+        description="可视化洞察列表（向后兼容，已废弃，请使用visualizations）"
+    )
+    
+    # 多个视图（新功能）
+    visualizations: Optional[List[SingleVisualization]] = Field(
+        default=None,
+        description="多个可视化视图列表"
     )
     
     # 元数据
