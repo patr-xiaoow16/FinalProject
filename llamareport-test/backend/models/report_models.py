@@ -326,6 +326,9 @@ class FinancialSnapshot(BaseModel):
     total_assets: Optional[KeyFinancialMetric] = Field(default=None, description="资产总额")
     net_interest_margin: Optional[KeyFinancialMetric] = Field(default=None, description="净息差")
     cost_income_ratio: Optional[KeyFinancialMetric] = Field(default=None, description="成本收入比")
+    npl_ratio: Optional[KeyFinancialMetric] = Field(default=None, description="不良率")
+    provision_coverage_ratio: Optional[KeyFinancialMetric] = Field(default=None, description="拨备覆盖率")
+    capital_adequacy_ratio: Optional[KeyFinancialMetric] = Field(default=None, description="资本充足率")
     
     # 一句话结论
     verdict: str = Field(description="一句话核心结论")

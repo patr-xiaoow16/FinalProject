@@ -18,11 +18,7 @@ from models.report_models import (
     FinancialStatementTables
 )
 from agents.visualization_agent import generate_visualization_for_query
-from agents.report_common import (
-    build_correlation_results,
-    build_multiple_linear_regression,
-    build_factor_analysis
-)
+# 相关性、多元线性回归、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_multiple_linear_regression / _llm_factor_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -1664,6 +1660,197 @@ async def generate_business_highlights(
         }
 
 
+async def _llm_correlation_analysis(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    year: str,
+    llm: Any
+) -> tuple:
+    """使用 LLM 生成相关性分析结果，返回 (correlation_results, data_sufficiency)。"""
+    import json
+    import re
+    prompt = f"""
+你是一位专业投资分析师，请基于以下指标抽取与输入变量表，进行**相关性分析**。
+
+### 指标抽取
+{json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
+
+### 输入变量表（含 period 与 value，同一 metric 多行表示多期数据）
+{json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
+
+### 要求
+1. 区分因变量（收益类）与自变量（盈利类、风险类、业务类、估值类、风险敞口类等）。
+2. 对每一对「因变量-自变量」在共同 period 上计算 Pearson 相关系数（或基于数值合理估算），并给出显著性解读（如强正相关、强负相关、中强相关、弱相关等）。
+3. 若因变量或自变量不足、或共同时间点少于 3 个，则 correlation_results 输出空数组 []，并在 data_sufficiency 中说明原因。
+
+请**只输出一个 JSON 对象**，不要其他文字。格式如下：
+{{
+  "correlation_results": [
+    {{
+      "target_metric": "因变量指标名",
+      "driver_metric": "自变量指标名",
+      "correlation": 0.85,
+      "significance": "强正相关",
+      "interpretation": "简要业务解读",
+      "data_points": 5
+    }}
+  ],
+  "data_sufficiency": {{
+    "is_sufficient": true,
+    "reason": null,
+    "sample_description": "如：2020-2024年5期"
+  }}
+}}
+"""
+    try:
+        response = await llm.achat([
+            ChatMessage(role="system", content="你是专业投资分析师，擅长相关性分析。必须只输出一个合法 JSON 对象，无其他内容。"),
+            ChatMessage(role="user", content=prompt)
+        ])
+        content = response.message.content if hasattr(response, "message") and hasattr(response.message, "content") else str(response)
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return [], {"is_sufficient": False, "reason": "LLM 未返回有效 JSON", "sample_description": None}
+        parsed = json.loads(match.group(0))
+        results = parsed.get("correlation_results") or []
+        sufficiency = parsed.get("data_sufficiency") or {}
+        sufficiency.setdefault("is_sufficient", bool(results))
+        return results, sufficiency
+    except Exception as e:
+        logger.warning(f"LLM 相关性分析失败: {e}")
+        return [], {"is_sufficient": False, "reason": str(e), "sample_description": None}
+
+
+async def _llm_multiple_linear_regression(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    year: str,
+    llm: Any
+) -> tuple:
+    """使用 LLM 生成多元线性回归分析结果，返回 (regression_dict, data_sufficiency)。"""
+    import json
+    import re
+    prompt = f"""
+你是一位专业投资分析师，请基于以下指标与变量表，进行**多元线性回归分析**（一个因变量，多个自变量）。
+
+### 指标抽取
+{json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
+
+### 输入变量表
+{json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
+
+### 要求
+1. 选定一个因变量（收益类）与多个自变量（至少 2 个），在共同 period 上建立多元线性回归。
+2. 输出截距 intercept 与各自变量的回归系数、R²、简要解释。若样本不足或无法计算，则 coefficients 为空、r_squared 为 null，interpretation 说明原因。
+
+请**只输出一个 JSON 对象**，格式如下：
+{{
+  "multiple_linear_regression": {{
+    "target_metric": "因变量名",
+    "independent_variables": ["自变量1", "自变量2"],
+    "coefficients": {{ "intercept": 0.5, "自变量1": 0.2, "自变量2": -0.1 }},
+    "r_squared": 0.65,
+    "interpretation": "模型简要解读",
+    "data_points": 5
+  }},
+  "regression_data_sufficiency": {{
+    "is_sufficient": true,
+    "reason": null,
+    "sample_description": "如：5 个样本"
+  }}
+}}
+"""
+    try:
+        response = await llm.achat([
+            ChatMessage(role="system", content="你是专业投资分析师，擅长多元线性回归。必须只输出一个合法 JSON 对象。"),
+            ChatMessage(role="user", content=prompt)
+        ])
+        content = response.message.content if hasattr(response, "message") and hasattr(response.message, "content") else str(response)
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return (
+                {"target_metric": None, "independent_variables": [], "coefficients": {}, "r_squared": None, "interpretation": "LLM 未返回有效 JSON"},
+                {"is_sufficient": False, "reason": "LLM 未返回有效 JSON", "sample_description": None}
+            )
+        parsed = json.loads(match.group(0))
+        reg = parsed.get("multiple_linear_regression") or {}
+        suff = parsed.get("regression_data_sufficiency") or {}
+        suff.setdefault("is_sufficient", bool(reg.get("coefficients")))
+        return reg, suff
+    except Exception as e:
+        logger.warning(f"LLM 多元线性回归失败: {e}")
+        return (
+            {"target_metric": None, "independent_variables": [], "coefficients": {}, "r_squared": None, "interpretation": str(e)},
+            {"is_sufficient": False, "reason": str(e), "sample_description": None}
+        )
+
+
+async def _llm_factor_analysis(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    year: str,
+    llm: Any
+) -> tuple:
+    """使用 LLM 生成因子分析结果，返回 (factor_dict, data_sufficiency)。"""
+    import json
+    import re
+    prompt = f"""
+你是一位专业投资分析师，请基于以下指标与变量表，进行**因子分析**（如主成分/因子提取）。
+
+### 指标抽取
+{json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
+
+### 输入变量表
+{json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
+
+### 要求
+1. 对自变量指标进行因子分析，提取 2～3 个因子，给出因子名称、各指标在因子上的载荷、各因子解释的方差比例、简要解读。
+2. 若指标数或样本不足，则 factors 为空数组、factor_loadings 为空对象，interpretation 说明原因。
+
+请**只输出一个 JSON 对象**，格式如下：
+{{
+  "factor_analysis": {{
+    "factors": ["因子1", "因子2"],
+    "factor_loadings": {{
+      "因子1": {{ "指标A": 0.9, "指标B": 0.1 }},
+      "因子2": {{ "指标A": 0.2, "指标B": 0.85 }}
+    }},
+    "variance_explained": {{ "因子1": 0.45, "因子2": 0.35 }},
+    "interpretation": "简要解读",
+    "data_points": 5
+  }},
+  "factor_data_sufficiency": {{
+    "is_sufficient": true,
+    "reason": null,
+    "sample_description": "如：5 个样本"
+  }}
+}}
+"""
+    try:
+        response = await llm.achat([
+            ChatMessage(role="system", content="你是专业投资分析师，擅长因子分析。必须只输出一个合法 JSON 对象。"),
+            ChatMessage(role="user", content=prompt)
+        ])
+        content = response.message.content if hasattr(response, "message") and hasattr(response.message, "content") else str(response)
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return (
+                {"factors": [], "factor_loadings": {}, "variance_explained": {}, "interpretation": "LLM 未返回有效 JSON"},
+                {"is_sufficient": False, "reason": "LLM 未返回有效 JSON", "sample_description": None}
+            )
+        parsed = json.loads(match.group(0))
+        fa = parsed.get("factor_analysis") or {}
+        suff = parsed.get("factor_data_sufficiency") or {}
+        suff.setdefault("is_sufficient", bool(fa.get("factors")))
+        return fa, suff
+    except Exception as e:
+        logger.warning(f"LLM 因子分析失败: {e}")
+        return (
+            {"factors": [], "factor_loadings": {}, "variance_explained": {}, "interpretation": str(e)},
+            {"is_sufficient": False, "reason": str(e), "sample_description": None}
+        )
+
+
 async def generate_profit_forecast_and_valuation(
     company_name: Annotated[str, "公司名称"],
     year: Annotated[str, "年份"],
@@ -1713,9 +1900,9 @@ async def generate_profit_forecast_and_valuation(
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
-        # 默认执行所有分析（相关性、多元线性回归、聚类、因子分析）
+        # 支持: all, correlation, clustering, correlation_only, regression_only, factor_only
         normalized_model = (model_type or "all").lower()
-        if normalized_model not in {"correlation", "clustering", "all"}:
+        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "regression_only", "factor_only"}:
             normalized_model = "all"
 
         prompt = f"""
@@ -1794,11 +1981,11 @@ async def generate_profit_forecast_and_valuation(
 
 ### 4. 输出要求（不要生成分析结果）
 
-- "correlation_results"必须输出空数组[]（由后端计算）
-- "strategy_conclusion"中的字段保持为空字符串或空数组（由后端生成）
-- "clustering_model"保持为null（由后端生成）
-- "multiple_linear_regression"保持为null（由后端生成）
-- "factor_analysis"保持为null（由后端生成）
+- "correlation_results"必须输出空数组[]（由后续 LLM 生成）
+- "strategy_conclusion"中的字段保持为空字符串或空数组（由后续 LLM 生成）
+- "clustering_model"保持为null（由后续 LLM 生成）
+- "multiple_linear_regression"保持为null（由后续 LLM 生成）
+- "factor_analysis"保持为null（由后续 LLM 生成）
 
 ## ⚠️ 严格输出要求（必须遵守）
 你必须输出一个有效的JSON对象，且仅输出JSON，不要有任何其他文字说明。
@@ -2012,25 +2199,28 @@ async def generate_profit_forecast_and_valuation(
             if isinstance(data_sufficiency, dict) and not isinstance(data_sufficiency.get("is_sufficient"), bool):
                 data_sufficiency["is_sufficient"] = False
 
-        # 自动执行四个分析：相关性分析、多元线性回归、聚类、因子分析
+        # 自动执行四个分析：相关性分析、多元线性回归、聚类、因子分析（支持单模块：correlation_only, regression_only, factor_only）
         if isinstance(result_dict, dict):
             # 1. 相关性分析
-            if normalized_model in {"correlation", "all"}:
+            if normalized_model in {"correlation", "all", "correlation_only"}:
                 correlation_results = result_dict.get("correlation_results") or []
                 data_sufficiency = result_dict.get("data_sufficiency")
                 if not correlation_results:
-                    computed_results, computed_sufficiency = build_correlation_results(
+                    logger.info("使用 LLM 执行相关性分析")
+                    computed_results, computed_sufficiency = await _llm_correlation_analysis(
                         result_dict.get("indicator_extraction") or [],
                         result_dict.get("variable_table") or [],
-                        year
+                        year,
+                        llm
                     )
                     result_dict["correlation_results"] = computed_results
                     result_dict["data_sufficiency"] = data_sufficiency or computed_sufficiency
                 elif not data_sufficiency:
-                    _, computed_sufficiency = build_correlation_results(
+                    _, computed_sufficiency = await _llm_correlation_analysis(
                         result_dict.get("indicator_extraction") or [],
                         result_dict.get("variable_table") or [],
-                        year
+                        year,
+                        llm
                     )
                     result_dict["data_sufficiency"] = computed_sufficiency
 
@@ -2108,27 +2298,29 @@ async def generate_profit_forecast_and_valuation(
                     "sample_description": None
                 }
             
-            # 2. 多元线性回归分析
-            if normalized_model in {"correlation", "all"}:
+            # 2. 多元线性回归分析（LLM）
+            if normalized_model in {"correlation", "all", "regression_only"}:
                 if not result_dict.get("multiple_linear_regression"):
-                    logger.info("开始执行多元线性回归分析")
-                    regression_result, regression_sufficiency = build_multiple_linear_regression(
+                    logger.info("使用 LLM 执行多元线性回归分析")
+                    regression_result, regression_sufficiency = await _llm_multiple_linear_regression(
                         result_dict.get("indicator_extraction") or [],
                         result_dict.get("variable_table") or [],
-                        year
+                        year,
+                        llm
                     )
                     result_dict["multiple_linear_regression"] = regression_result
                     if not result_dict.get("regression_data_sufficiency"):
                         result_dict["regression_data_sufficiency"] = regression_sufficiency
             
-            # 3. 因子分析
-            if normalized_model in {"correlation", "all"}:
+            # 3. 因子分析（LLM）
+            if normalized_model in {"correlation", "all", "factor_only"}:
                 if not result_dict.get("factor_analysis"):
-                    logger.info("开始执行因子分析")
-                    factor_result, factor_sufficiency = build_factor_analysis(
+                    logger.info("使用 LLM 执行因子分析")
+                    factor_result, factor_sufficiency = await _llm_factor_analysis(
                         result_dict.get("indicator_extraction") or [],
                         result_dict.get("variable_table") or [],
-                        year
+                        year,
+                        llm
                     )
                     result_dict["factor_analysis"] = factor_result
                     if not result_dict.get("factor_data_sufficiency"):

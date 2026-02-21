@@ -125,7 +125,7 @@ class GenerateSectionRequest(BaseModel):
     year: str = Field(description="年份")
     model_type: Optional[str] = Field(
         default=None,
-        description="投资策略模型类型: all（默认，包含相关性分析、多元线性回归、聚类分析和因子分析）"
+        description="投资策略模型类型: all（综合）、correlation_only（仅相关性）、regression_only（仅多元回归）、clustering（仅聚类）、factor_only（仅因子分析）"
     )
 
 

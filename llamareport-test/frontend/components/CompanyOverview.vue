@@ -2,8 +2,16 @@
   <Card title="财务概况" icon="🏢" :status="status" empty-text="暂无财务概况数据">
     <template #default>
       <div class="company-overview-container">
-        <!-- 一句话结论 - 放在最上面 -->
-        <div v-if="overviewData?.verdict" class="verdict-container">
+        <!-- 未选中文件时提示 -->
+        <div v-if="!selectedFile" class="overview-placeholder">
+          <p class="placeholder-text">请在左侧文件列表中选择文件以查看财务概况</p>
+        </div>
+        <!-- 已选文件但未处理：提示先处理 -->
+        <div v-else-if="selectedFile && !loading && (overviewForFilename !== selectedFile.filename || !overviewData)" class="overview-placeholder">
+          <p class="placeholder-text">请先点击「处理」按钮处理选中的文件，处理完成后将自动展示财务概况</p>
+        </div>
+        <!-- 一句话结论 - 处理完成后展示 -->
+        <div v-else-if="overviewData?.verdict" class="verdict-container">
           <div class="verdict-label">
             <span class="verdict-icon">📊</span>
             <span>核心结论</span>
@@ -21,82 +29,70 @@
         </div>
         
         <!-- 无结论时显示 -->
-        <div v-else-if="!overviewData?.verdict" class="no-verdict">
+        <div v-else-if="selectedFile && overviewForFilename === selectedFile.filename && !overviewData?.verdict" class="no-verdict">
           <p class="no-verdict-text">暂无财务概况结论</p>
         </div>
         
-        <!-- 关键指标卡片 - 只显示有数据的指标 -->
-        <div v-if="hasMetrics" class="metrics-cards">
-          <div v-if="hasMetricData(overviewData.roe)" class="metric-card clickable" @click="handleMetricClick('ROE', overviewData.roe)">
-            <div class="metric-header">
-              <span class="metric-icon">📊</span>
-              <span class="metric-name">ROE</span>
+        <!-- 核心指标：仅当当前选中的文件已处理并加载了概况时展示 -->
+        <div v-if="selectedFile && overviewForFilename === selectedFile.filename && overviewData" class="core-metrics-wrap">
+          <div class="core-metrics-title">{{ overviewData.year ? overviewData.year + '年核心指标' : '核心指标' }}</div>
+          <div class="metrics-cards metrics-cards-2col">
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.revenue) }" @click="hasMetricData(overviewData.revenue) && handleMetricClick('营业收入', overviewData.revenue)">
+              <div class="metric-name">{{ metricLabel('revenue') }}</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.revenue) }}</div>
+              <div v-if="getMetricChange(overviewData.revenue)" :class="['metric-change', getChangeClassInverted(overviewData.revenue)]">
+                {{ getMetricChangeWithArrow(overviewData.revenue) }}
+              </div>
             </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.roe) }}</div>
-            <div v-if="getMetricChange(overviewData.roe)" :class="['metric-change', getChangeClass(overviewData.roe)]">
-              {{ getMetricChange(overviewData.roe) }}
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.net_profit) }" @click="hasMetricData(overviewData.net_profit) && handleMetricClick('净利润', overviewData.net_profit)">
+              <div class="metric-name">{{ metricLabel('net_profit') }}</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.net_profit) }}</div>
+              <div v-if="getMetricChange(overviewData.net_profit)" :class="['metric-change', getChangeClassInverted(overviewData.net_profit)]">
+                {{ getMetricChangeWithArrow(overviewData.net_profit) }}
+              </div>
             </div>
-            <div class="metric-hint">点击查看可视化</div>
-          </div>
-          
-          <div v-if="hasMetricData(overviewData.revenue)" class="metric-card clickable" @click="handleMetricClick('营业收入', overviewData.revenue)">
-            <div class="metric-header">
-              <span class="metric-icon">📈</span>
-              <span class="metric-name">营业收入</span>
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.total_assets) }" @click="hasMetricData(overviewData.total_assets) && handleMetricClick('总资产', overviewData.total_assets)">
+              <div class="metric-name">{{ metricLabel('total_assets') }}</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.total_assets) }}</div>
+              <div v-if="getMetricChange(overviewData.total_assets)" :class="['metric-change', getChangeClassInverted(overviewData.total_assets)]">
+                {{ getMetricChangeWithArrow(overviewData.total_assets) }}
+              </div>
             </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.revenue) }}</div>
-            <div v-if="getMetricChange(overviewData.revenue)" :class="['metric-change', getChangeClass(overviewData.revenue)]">
-              {{ getMetricChange(overviewData.revenue) }}
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.roe) }" @click="hasMetricData(overviewData.roe) && handleMetricClick('ROE', overviewData.roe)">
+              <div class="metric-name">ROE</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.roe) }}</div>
+              <div v-if="getMetricChange(overviewData.roe)" :class="['metric-change', getChangeClassInverted(overviewData.roe)]">
+                {{ getMetricChangeWithArrow(overviewData.roe) }}
+              </div>
             </div>
-            <div class="metric-hint">点击查看可视化</div>
-          </div>
-          
-          <div v-if="hasMetricData(overviewData.net_profit)" class="metric-card clickable" @click="handleMetricClick('净利润', overviewData.net_profit)">
-            <div class="metric-header">
-              <span class="metric-icon">💰</span>
-              <span class="metric-name">净利润</span>
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.net_interest_margin) }" @click="hasMetricData(overviewData.net_interest_margin) && handleMetricClick('净息差', overviewData.net_interest_margin)">
+              <div class="metric-name">净息差</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.net_interest_margin) }}</div>
+              <div v-if="getMetricChange(overviewData.net_interest_margin)" :class="['metric-change', getChangeClassInverted(overviewData.net_interest_margin)]">
+                {{ getMetricChangeWithArrow(overviewData.net_interest_margin) }}
+              </div>
             </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.net_profit) }}</div>
-            <div v-if="getMetricChange(overviewData.net_profit)" :class="['metric-change', getChangeClass(overviewData.net_profit)]">
-              {{ getMetricChange(overviewData.net_profit) }}
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.npl_ratio) }" @click="hasMetricData(overviewData.npl_ratio) && handleMetricClick('不良率', overviewData.npl_ratio)">
+              <div class="metric-name">不良率</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.npl_ratio) }}</div>
+              <div v-if="getMetricChange(overviewData.npl_ratio)" :class="['metric-change', getChangeClassInverted(overviewData.npl_ratio)]">
+                {{ getMetricChangeWithArrow(overviewData.npl_ratio) }}
+              </div>
             </div>
-            <div class="metric-hint">点击查看可视化</div>
-          </div>
-          
-          <div v-if="hasMetricData(overviewData.total_assets)" class="metric-card clickable" @click="handleMetricClick('资产总额', overviewData.total_assets)">
-            <div class="metric-header">
-              <span class="metric-icon">🏦</span>
-              <span class="metric-name">资产总额</span>
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.provision_coverage_ratio) }" @click="hasMetricData(overviewData.provision_coverage_ratio) && handleMetricClick('拨备覆盖率', overviewData.provision_coverage_ratio)">
+              <div class="metric-name">拨备覆盖率</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.provision_coverage_ratio) }}</div>
+              <div v-if="getMetricChange(overviewData.provision_coverage_ratio)" :class="['metric-change', getChangeClassInverted(overviewData.provision_coverage_ratio)]">
+                {{ getMetricChangeWithArrow(overviewData.provision_coverage_ratio) }}
+              </div>
             </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.total_assets) }}</div>
-            <div v-if="getMetricChange(overviewData.total_assets)" :class="['metric-change', getChangeClass(overviewData.total_assets)]">
-              {{ getMetricChange(overviewData.total_assets) }}
+            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.capital_adequacy_ratio) }" @click="hasMetricData(overviewData.capital_adequacy_ratio) && handleMetricClick('资本充足率', overviewData.capital_adequacy_ratio)">
+              <div class="metric-name">资本充足率</div>
+              <div class="metric-value">{{ formatMetricValue(overviewData.capital_adequacy_ratio) }}</div>
+              <div v-if="getMetricChange(overviewData.capital_adequacy_ratio)" :class="['metric-change', getChangeClassInverted(overviewData.capital_adequacy_ratio)]">
+                {{ getMetricChangeWithArrow(overviewData.capital_adequacy_ratio) }}
+              </div>
             </div>
-            <div class="metric-hint">点击查看可视化</div>
-          </div>
-          
-          <div v-if="hasMetricData(overviewData.net_interest_margin)" class="metric-card clickable" @click="handleMetricClick('净息差', overviewData.net_interest_margin)">
-            <div class="metric-header">
-              <span class="metric-icon">📊</span>
-              <span class="metric-name">净息差</span>
-            </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.net_interest_margin) }}</div>
-            <div v-if="getMetricChange(overviewData.net_interest_margin)" :class="['metric-change', getChangeClass(overviewData.net_interest_margin)]">
-              {{ getMetricChange(overviewData.net_interest_margin) }}
-            </div>
-            <div class="metric-hint">点击查看可视化</div>
-          </div>
-          
-          <div v-if="hasMetricData(overviewData.cost_income_ratio)" class="metric-card clickable" @click="handleMetricClick('成本收入比', overviewData.cost_income_ratio)">
-            <div class="metric-header">
-              <span class="metric-icon">💼</span>
-              <span class="metric-name">成本收入比</span>
-            </div>
-            <div class="metric-value">{{ formatMetricValue(overviewData.cost_income_ratio) }}</div>
-            <div v-if="getMetricChange(overviewData.cost_income_ratio)" :class="['metric-change', getChangeClass(overviewData.cost_income_ratio)]">
-              {{ getMetricChange(overviewData.cost_income_ratio) }}
-            </div>
-            <div class="metric-hint">点击查看可视化</div>
           </div>
         </div>
       </div>
@@ -115,7 +111,10 @@ export default {
   props: { 
     data: { type: Object, default: null }, 
     loading: { type: Boolean, default: false },
-    overviewData: { type: Object, default: null }
+    overviewData: { type: Object, default: null },
+    selectedFile: { type: Object, default: null },
+    /** 当前概况对应的文件名（仅在处理该文件成功后有值） */
+    overviewForFilename: { type: String, default: null }
   },
   emits: ['generate-report', 'metric-click'],
   data() { 
@@ -125,6 +124,7 @@ export default {
   },
   computed: {
     status() {
+      if (!this.selectedFile) return 'empty';
       if (this.loading) return 'loading';
       if (!this.overviewData && !this.data) return 'empty';
       return 'content';
@@ -132,11 +132,14 @@ export default {
     hasMetrics() {
       return this.overviewData && (
         this.hasMetricData(this.overviewData.roe) ||
-        this.hasMetricData(this.overviewData.revenue) || 
-        this.hasMetricData(this.overviewData.net_profit) || 
+        this.hasMetricData(this.overviewData.revenue) ||
+        this.hasMetricData(this.overviewData.net_profit) ||
         this.hasMetricData(this.overviewData.total_assets) ||
         this.hasMetricData(this.overviewData.net_interest_margin) ||
-        this.hasMetricData(this.overviewData.cost_income_ratio)
+        this.hasMetricData(this.overviewData.cost_income_ratio) ||
+        this.hasMetricData(this.overviewData.npl_ratio) ||
+        this.hasMetricData(this.overviewData.provision_coverage_ratio) ||
+        this.hasMetricData(this.overviewData.capital_adequacy_ratio)
       );
     }
   },
@@ -210,22 +213,29 @@ export default {
       }
       return '—';
     },
+    /** 统一规范化趋势字符串（如将 Unicode 减号 − 转为 ASCII -），便于判断涨跌 */
+    normalizeChangeRate(str) {
+      if (str == null || typeof str !== 'string') return str;
+      return str.replace(/\u2212/g, '-').trim();
+    },
     getMetricChange(metric) {
       if (!metric || typeof metric !== 'object') return null;
       if (metric.is_missing) return null;
       const changeRate = metric.change_rate;
       const direction = metric.change_direction;
+      const isFlat = direction === '持平' || direction === '不变';
+      if (isFlat) return '—';
       if (changeRate) {
-        return changeRate;
+        return this.normalizeChangeRate(changeRate) || changeRate;
       }
       if (direction) {
-        return direction === '增长' ? '↑' : direction === '下降' ? '↓' : '→';
+        return direction === '增长' ? '↑' : direction === '下降' ? '↓' : '—';
       }
       return null;
     },
     getChangeClass(metric) {
       if (!metric || typeof metric !== 'object') return '';
-      const changeRate = metric.change_rate;
+      const changeRate = this.normalizeChangeRate(metric.change_rate);
       const direction = metric.change_direction;
       
       if (changeRate) {
@@ -240,6 +250,39 @@ export default {
       if (direction === '下降') return 'change-negative';
       
       return '';
+    },
+    /** 核心指标区：上升为红色、下降为绿色、不变为黑色— */
+    getChangeClassInverted(metric) {
+      if (!metric || typeof metric !== 'object') return '';
+      const changeRate = this.normalizeChangeRate(metric.change_rate);
+      const direction = metric.change_direction;
+      if (direction === '持平' || direction === '不变') return 'change-flat';
+      const isUp = (changeRate && (changeRate.includes('+') || changeRate.includes('增长'))) || direction === '增长';
+      const isDown = (changeRate && (changeRate.includes('-') || changeRate.includes('下降'))) || direction === '下降';
+      if (isUp) return 'change-up-red';
+      if (isDown) return 'change-down-green';
+      return '';
+    },
+    /** 带箭头的趋势文案：▲ 3.3% 或 ▼ 10.9% 或 —（不变） */
+    getMetricChangeWithArrow(metric) {
+      const direction = metric && typeof metric === 'object' ? metric.change_direction : null;
+      if (direction === '持平' || direction === '不变') return '—';
+      const change = this.getMetricChange(metric);
+      if (!change) return '';
+      const normalized = this.normalizeChangeRate(String(change));
+      const isUp = (normalized && (normalized.includes('+') || normalized.includes('增长'))) || direction === '增长';
+      const isDown = (normalized && (normalized.includes('-') || normalized.includes('下降'))) || direction === '下降';
+      const arrow = isUp ? '▲ ' : isDown ? '▼ ' : '';
+      const rate = String(change).replace(/增长|下降|持平|不变/g, '').trim().replace(/\u2212/g, '-');
+      return rate ? arrow + rate : change;
+    },
+    metricLabel(key) {
+      const labels = {
+        revenue: '营业收入(亿)',
+        net_profit: '净利润(亿)',
+        total_assets: '总资产(亿)'
+      };
+      return labels[key] || key;
     },
     handleMetricClick(metricName, metricData) {
       // 触发事件，传递指标名称和数据
@@ -537,6 +580,16 @@ export default {
   border: 1px solid #fca5a5;
 }
 
+.overview-placeholder {
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.placeholder-text {
+  color: #9ca3af;
+  font-size: 0.9rem;
+}
+
 .no-verdict {
   padding: 40px 20px;
   text-align: center;
@@ -548,7 +601,81 @@ export default {
   font-style: italic;
 }
 
-/* 关键指标卡片样式 */
+/* 核心指标区域：与核心结论外围同宽，白底、每行2个，不超出 */
+.core-metrics-wrap {
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 14px 12px;
+  margin: 0 -4px 16px -4px;
+  width: calc(100% + 8px);
+  max-width: calc(100% + 8px);
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.core-metrics-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #b45309;
+  margin-bottom: 12px;
+  padding-left: 2px;
+}
+
+/* 核心指标区强制每行 2 个，缩小两列间距以增加每卡宽度，不超出容器 */
+.core-metrics-wrap .metrics-cards.metrics-cards-2col,
+.metrics-cards-2col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 8px;
+  min-width: 0;
+}
+
+/* 核心指标单卡：不超出外围 */
+.core-metric.metric-card {
+  padding: 10px 12px;
+  min-width: 0;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.core-metric .metric-name {
+  font-size: 0.7rem;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
+
+.core-metric .metric-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 4px;
+}
+
+/* 趋势：上升红色、下降绿色 */
+.metric-change.change-up-red {
+  color: #dc2626;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.metric-change.change-down-green {
+  color: #16a34a;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* 趋势不变：黑色 — */
+.metric-change.change-flat {
+  color: #111827;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* 关键指标卡片样式（兼容旧布局） */
 .metrics-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

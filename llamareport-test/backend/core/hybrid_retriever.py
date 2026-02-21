@@ -246,14 +246,16 @@ class HybridRetriever:
         try:
             logger.info("🚀 开始构建Hybrid Retriever索引")
             
-            # 1. 构建文本索引
+            # 1. 构建文本索引（标注 source_type 便于先 Excel 再 PDF）
             text_documents = []
             for doc_name, doc_data in processed_documents.items():
+                source_type = 'excel' if (doc_name or '').lower().endswith(('.xlsx', '.xls')) else 'pdf'
                 for doc in doc_data['documents']:
                     doc.metadata.update({
                         'doc_type': 'text',
                         'channel': 'text_index',
-                        'source_file': doc_name
+                        'source_file': doc_name,
+                        'source_type': source_type
                     })
                     text_documents.append(doc)
             
@@ -266,9 +268,10 @@ class HybridRetriever:
                 )
                 logger.info(f"✅ 文本索引构建完成: {len(text_documents)}个文档")
             
-            # 2. 构建表格索引
+            # 2. 构建表格索引（标注 source_type：先 Excel 表格再 PDF 表格）
             table_documents = []
             for doc_name, tables in extracted_tables.items():
+                source_type = 'excel' if (doc_name or '').lower().endswith(('.xlsx', '.xls')) else 'pdf'
                 for table in tables:
                     table_text = self._table_to_text(table)
                     table_doc = Document(
@@ -276,11 +279,12 @@ class HybridRetriever:
                         metadata={
                             'doc_type': 'table',
                             'channel': 'table_index',
+                            'source_type': source_type,
                             'indicator': table.get('summary', ''),
                             'year': self._extract_year_from_table(table),
                             'source': f"{doc_name}_page_{table['page_number']}",
-                            'source_file': doc_name,  # 添加source_file字段用于过滤
-                            'filename': doc_name,     # 添加filename字段用于过滤
+                            'source_file': doc_name,
+                            'filename': doc_name,
                             'table_id': table['table_id'],
                             'is_financial': table.get('is_financial', False)
                         }
@@ -403,19 +407,42 @@ class HybridRetriever:
                 score_result = self.scorer.calculate_comprehensive_score(
                     query, result['document'], result['semantic_score']
                 )
-                
+                doc = result['document']
+                is_table = (
+                    doc.metadata.get('channel') == 'table_index'
+                    or doc.metadata.get('document_type') == 'table_data'
+                    or doc.metadata.get('is_financial', False)
+                )
+                source_type = doc.metadata.get('source_type', 'pdf')
                 scored_results.append({
-                    'document': result['document'],
+                    'document': doc,
                     'semantic_score': result['semantic_score'],
                     'comprehensive_score': score_result['comprehensive_score'],
                     'sim_score': score_result['sim_score'],
                     'metric_score': score_result['metric_score'],
                     'year_score': score_result['year_score'],
-                    'strategy': strategy
+                    'strategy': strategy,
+                    '_is_table': is_table,
+                    '_source_type': source_type,
                 })
             
-            # 6. 按综合评分排序
-            scored_results.sort(key=lambda x: x['comprehensive_score'], reverse=True)
+            # 6. 排序：table_first 时先 Excel 表格再 PDF 表格，再 Excel 文本再 PDF 文本（同组内按综合分）
+            if strategy == 'table_first':
+                table_list = [x for x in scored_results if x.get('_is_table')]
+                text_list = [x for x in scored_results if not x.get('_is_table')]
+                # Excel 优先：source_type=='excel' 排在前，再按综合分降序
+                def _sort_key_excel_first(x):
+                    return (0 if x.get('_source_type') == 'excel' else 1, -x['comprehensive_score'])
+                table_list.sort(key=_sort_key_excel_first)
+                text_list.sort(key=_sort_key_excel_first)
+                scored_results = table_list + text_list
+            else:
+                scored_results.sort(key=lambda x: x['comprehensive_score'], reverse=True)
+            
+            # 去掉临时字段
+            for x in scored_results:
+                x.pop('_is_table', None)
+                x.pop('_source_type', None)
             
             # 7. 返回Top-K结果
             return scored_results[:top_k]
@@ -467,18 +494,32 @@ class HybridRetriever:
         return results
     
     def _retrieve_table_first(self, query: str, top_k: int) -> List[Dict[str, Any]]:
-        """表格优先检索"""
+        """先 Excel 表格再 PDF 表格，再 Excel 文本再 PDF 文本"""
         results = []
+        # 表格检索多取一些，便于命中「年度指标」等汇总表
+        table_top_k = min(50, max(top_k * 2, 40))
         
+        # 1. 先检索表格索引（Excel 表 + PDF 表，后面按 source_type 排成 Excel 在前）
         if self.table_index:
-            retriever = VectorIndexRetriever(index=self.table_index, similarity_top_k=top_k)
-            nodes = retriever.retrieve(query)
-            
-            for node in nodes:
+            table_retriever = VectorIndexRetriever(index=self.table_index, similarity_top_k=table_top_k)
+            table_nodes = table_retriever.retrieve(query)
+            for node in table_nodes:
                 results.append({
                     'document': node,
                     'semantic_score': getattr(node, 'score', 0.0)
                 })
+            logger.info(f"📊 表格优先检索: 表格结果 {len(table_nodes)} 条（含 Excel/PDF 表）")
+        
+        # 2. 再检索文本索引（PDF/Excel 文本，后面按 source_type 排成 Excel 在前）
+        if self.text_index:
+            text_retriever = VectorIndexRetriever(index=self.text_index, similarity_top_k=top_k)
+            text_nodes = text_retriever.retrieve(query)
+            for node in text_nodes:
+                results.append({
+                    'document': node,
+                    'semantic_score': getattr(node, 'score', 0.0)
+                })
+            logger.info(f"📄 表格优先检索: 文本结果 {len(text_nodes)} 条（追加在表格之后）")
         
         return results
     

@@ -153,13 +153,13 @@ class TableExtractor:
                 
                 # 检查是否是表格行（包含 | 分隔符）
                 if '|' in line:
-                    # 分割单元格
+                    # 分割单元格（Excel 输出为 "a | b | c"，不要误删首列和末列）
                     cells = [cell.strip() for cell in line.split('|')]
-                    # 移除首尾空元素
-                    if len(cells) > 2:
-                        cells = cells[1:-1]
-                    elif len(cells) == 2:
-                        cells = [cells[0] if cells[0] else cells[1]]
+                    # 仅移除首尾的空字符串（Markdown 格式 "| a | b | c |" 会产生首尾空）
+                    while cells and cells[0] == '' and len(cells) > 1:
+                        cells = cells[1:]
+                    while cells and cells[-1] == '' and len(cells) > 1:
+                        cells = cells[:-1]
                     
                     if cells and any(cell for cell in cells):
                         table_rows.append(cells)

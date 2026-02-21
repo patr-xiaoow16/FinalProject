@@ -27,6 +27,8 @@ const App = {
     const companyOverviewData = ref(null)
     const companyOverviewLoading = ref(false)
     const quickOverviewData = ref(null)
+    /** 当前财务概况对应的文件名（仅在处理该文件成功后才有值） */
+    const overviewForFilename = ref(null)
     const notesAndRisksData = ref(null)
     const notesAndRisksLoading = ref(false)
     const dupontData = ref(null)
@@ -63,7 +65,16 @@ const App = {
       setTimeout(() => { message.type = ''; message.text = '' }, 3000)
     }
     
-    const handleFileSelected = (file) => { selectedFile.value = file }
+    const handleFileSelected = (file) => {
+      selectedFile.value = file
+      if (!file?.filename) {
+        quickOverviewData.value = null
+        overviewForFilename.value = null
+      } else if (file.filename !== overviewForFilename.value) {
+        // 选中的不是当前已加载概况的文件，清空概况区域，提示先处理
+        quickOverviewData.value = null
+      }
+    }
     const handleFileUploaded = () => { 
       loadFileList()
       setTimeout(() => checkIndexStatus(), 500)
@@ -72,6 +83,8 @@ const App = {
       loadFileList()
       if (selectedFile.value && !files.value.find(f => f.filename === selectedFile.value.filename)) {
         selectedFile.value = null
+        quickOverviewData.value = null
+        overviewForFilename.value = null
       }
     }
     
@@ -92,12 +105,8 @@ const App = {
           const indexBuilt = result.processing_summary?.index_info?.index_built
           if (indexBuilt) {
             showMessage('success', '✅ 文件处理完成！索引已构建，可以开始问答了。')
-            // 自动获取快速概况
-            setTimeout(() => {
-              if (typeof loadQuickOverview === 'function') {
-                loadQuickOverview()
-              }
-            }, 500)
+            // 处理完成后自动拉取该文件的财务概况
+            setTimeout(() => loadQuickOverview(filename), 500)
           } else {
             showMessage('success', '⚠️ 文件处理完成，但索引构建失败，请检查日志。')
           }
@@ -151,12 +160,12 @@ const App = {
           
           if (indexBuilt) {
             showMessage('success', `✅ ${successCount}/${totalCount} 个文件处理完成！索引已构建，可以开始问答了。`)
-            // 自动获取快速概况
-            setTimeout(() => {
-              if (typeof loadQuickOverview === 'function') {
-                loadQuickOverview()
-              }
-            }, 500)
+            // 处理完成后：若当前选中文件在成功列表中则拉取其概况，否则拉取第一个成功文件
+            const successFilenames = (result.file_results || []).filter(r => r.status === 'success').map(f => f.filename)
+            const toLoad = selectedFile.value && successFilenames.includes(selectedFile.value.filename)
+              ? selectedFile.value.filename
+              : successFilenames[0]
+            if (toLoad) setTimeout(() => loadQuickOverview(toLoad), 500)
           } else {
             showMessage('warning', `⚠️ ${successCount}/${totalCount} 个文件处理完成，但索引构建失败，请检查日志。`)
           }
@@ -2034,23 +2043,26 @@ const App = {
       }
     }
     
-    const loadQuickOverview = async () => {
+    const loadQuickOverview = async (filename) => {
+      if (!filename) return
       companyOverviewLoading.value = true
       try {
+        const body = JSON.stringify({ filename })
         const response = await fetch('/query/quick-overview', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json' },
+          body
         })
         const result = await response.json()
         if (response.ok && result.status === 'success') {
           quickOverviewData.value = result.overview
+          overviewForFilename.value = filename
           showMessage('success', '✅ 财务概况已生成')
         } else {
           console.warn('快速概况生成失败:', result)
         }
       } catch (error) {
         console.error('加载快速概况失败:', error)
-        // 不显示错误，静默失败
       } finally {
         companyOverviewLoading.value = false
       }
@@ -2087,7 +2099,7 @@ const App = {
       currentPage, systemStatus, files, selectedFile, chatMessages, queryLoading, message,
       companyOverviewData, companyOverviewLoading, notesAndRisksData, notesAndRisksLoading,
       dupontData, dupontLoading, visualizationData, visualizationLoading, visualizationCards, processStatus, suggestions,
-      quickOverviewData,
+      quickOverviewData, overviewForFilename,
       showMessage, handleFileSelected, handleFileUploaded, handleFileDeleted, handleFileProcess, handleFileProcessMultiple,
       handleSendMessage, handleAgentQuery, executeAgentQuery, handleDupontAnalysis, handleGetSuggestions, handleQuickAnalysis,
       handleGenerateReport, handleGenerateSection, handleClearChat, checkIndexStatus, loadQuickOverview,
@@ -2477,7 +2489,7 @@ const App = {
         <main class="app-main">
           <aside class="left-panel">
             <FilePreviewCard ref="filePreviewCard" :files="files" @file-selected="handleFileSelected" @file-uploaded="handleFileUploaded" @file-deleted="handleFileDeleted" @file-process="handleFileProcess" @file-process-multiple="handleFileProcessMultiple" @show-message="showMessage" @files-processed="handleFilesProcessed" />
-            <CompanyOverview :data="companyOverviewData" :loading="companyOverviewLoading" :overview-data="quickOverviewData" @generate-report="handleGenerateReport" @metric-click="handleMetricClick" />
+            <CompanyOverview :data="companyOverviewData" :loading="companyOverviewLoading" :overview-data="quickOverviewData" :selected-file="selectedFile" :overview-for-filename="overviewForFilename" @generate-report="handleGenerateReport" @metric-click="handleMetricClick" />
           </aside>
           <section class="middle-panel">
             <ChatArea :messages="chatMessages" :loading="queryLoading" :suggestions="suggestions" :selected-file="selectedFile" :dupont-data="dupontData" @send-message="handleSendMessage" @agent-query="handleAgentQuery" @quick-analysis="handleQuickAnalysis" @agent-analysis="goToAgentAnalysis" @dupont-analysis="handleDupontAnalysis" @get-suggestions="handleGetSuggestions" @clear-chat="handleClearChat" @delete-message="handleDeleteMessage" />

@@ -41,15 +41,50 @@
               <span class="btn-icon">⭐</span>
               <span class="btn-text">业务亮点</span>
             </button>
-            <button 
-              class="quick-btn profit-forecast" 
-              @click="handleQuickAnalysis('profit_forecast')"
-              :disabled="loading"
-              title="生成投资策略分析（包含相关性分析、多元线性回归、聚类和因子分析）"
-            >
-              <span class="btn-icon">📈</span>
-              <span class="btn-text">投资策略</span>
-            </button>
+            <div class="profit-forecast-group">
+              <button 
+                class="quick-btn profit-forecast" 
+                @click.stop="toggleProfitForecastSubButtons"
+                :disabled="loading"
+                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、多元回归、聚类分析、因子分析、综合投资策略'"
+              >
+                <span class="btn-icon">📈</span>
+                <span class="btn-text">投资策略</span>
+                <span class="sub-arrow">{{ showProfitForecastSubButtons ? '▼' : '▶' }}</span>
+              </button>
+              <div v-show="showProfitForecastSubButtons" class="profit-forecast-sub-buttons">
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'correlation_only')"
+                  :disabled="loading"
+                  title="仅生成相关性分析"
+                >相关性分析</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'regression_only')"
+                  :disabled="loading"
+                  title="仅生成多元线性回归分析"
+                >多元回归</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'clustering')"
+                  :disabled="loading"
+                  title="仅生成聚类分析"
+                >聚类分析</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'factor_only')"
+                  :disabled="loading"
+                  title="仅生成因子分析"
+                >因子分析</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'all')"
+                  :disabled="loading"
+                  title="生成综合投资策略（四项分析+综合洞察）"
+                >综合投资策略</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="chat-messages" ref="messagesContainer">
@@ -135,10 +170,14 @@ export default {
     return { 
       inputText: '', 
       showSuggestions: false,
-      hoveredMessageIndex: null
+      hoveredMessageIndex: null,
+      showProfitForecastSubButtons: false
     }; 
   },
   methods: {
+    toggleProfitForecastSubButtons() {
+      this.showProfitForecastSubButtons = !this.showProfitForecastSubButtons;
+    },
     sendMessage() {
       if (!this.inputText.trim() || this.loading) return;
       const question = this.inputText.trim();
@@ -179,7 +218,7 @@ export default {
         return;
       }
       
-      // 分析类型映射
+      // 分析类型映射（投资策略子类型优先）
       const typeMap = {
         'financial_review': '财务点评',
         'business_guidance': '业绩指引',
@@ -187,8 +226,16 @@ export default {
         'profit_forecast': '投资策略',
         'dupont_analysis': '杜邦分析'
       };
-      
-      const typeName = typeMap[analysisType] || analysisType;
+      const profitForecastSubMap = {
+        'correlation_only': '相关性分析',
+        'regression_only': '多元回归',
+        'clustering': '聚类分析',
+        'factor_only': '因子分析',
+        'all': '综合投资策略'
+      };
+      const typeName = (analysisType === 'profit_forecast' && modelType && profitForecastSubMap[modelType])
+        ? profitForecastSubMap[modelType]
+        : (typeMap[analysisType] || analysisType);
       
       // 构建问题 - 改进的提取逻辑
       let companyName = '';

@@ -635,7 +635,7 @@ body {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 4px;
-  align-items: stretch;
+  align-items: start; /* 展开投资策略子菜单时，其余按钮保持原高度不拉伸 */
 }
 
 .quick-btn {
@@ -676,6 +676,57 @@ body {
   line-height: 1;
   font-size: 10px;
   white-space: nowrap;
+}
+
+/* 投资策略主按钮 + 漂浮子菜单（不占布局高度） */
+.profit-forecast-group {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+
+.profit-forecast-group .quick-btn.profit-forecast {
+  width: 100%;
+  justify-content: center;
+}
+
+.profit-forecast-group .sub-arrow {
+  margin-left: 2px;
+  font-size: 9px;
+  opacity: 0.8;
+}
+
+/* 漂浮层：绝对定位在「投资策略」按钮下方，不撑高整体框架 */
+.profit-forecast-sub-buttons {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 120px;
+  padding: 6px 4px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profit-forecast-sub-buttons .sub-btn {
+  padding: 4px 8px;
+  font-size: 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-radius: 4px;
+}
+
+.profit-forecast-sub-buttons .sub-btn:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.profit-forecast-sub-buttons .sub-btn .btn-icon {
+  display: none;
 }
 
 .strategy-model-wrapper {
