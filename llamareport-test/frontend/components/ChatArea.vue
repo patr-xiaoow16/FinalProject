@@ -41,23 +41,15 @@
               <span class="btn-icon">⭐</span>
               <span class="btn-text">业务亮点</span>
             </button>
-            <div class="strategy-model-wrapper">
-              <button 
-                class="quick-btn profit-forecast" 
-                @click="toggleStrategyModelMenu"
-                :disabled="loading"
-                title="生成投资策略分析"
-              >
-                <span class="btn-icon">📈</span>
-                <span class="btn-text">投资策略</span>
-              </button>
-              <div v-if="showStrategyModelMenu" class="strategy-model-menu">
-                <div class="strategy-model-title">选择模型</div>
-                <button class="strategy-model-option" @click="handleStrategyModelSelect('correlation')">相关性分析</button>
-                <button class="strategy-model-option" @click="handleStrategyModelSelect('clustering')">聚类分析</button>
-                <button class="strategy-model-option" @click="handleStrategyModelSelect('all')">综合输出</button>
-              </div>
-            </div>
+            <button 
+              class="quick-btn profit-forecast" 
+              @click="handleQuickAnalysis('profit_forecast')"
+              :disabled="loading"
+              title="生成投资策略分析（包含相关性分析、多元线性回归、聚类和因子分析）"
+            >
+              <span class="btn-icon">📈</span>
+              <span class="btn-text">投资策略</span>
+            </button>
           </div>
         </div>
         <div class="chat-messages" ref="messagesContainer">
@@ -143,8 +135,7 @@ export default {
     return { 
       inputText: '', 
       showSuggestions: false,
-      hoveredMessageIndex: null,
-      showStrategyModelMenu: false
+      hoveredMessageIndex: null
     }; 
   },
   methods: {
@@ -294,28 +285,6 @@ export default {
           : '';
         this.$emit('agent-query', `${question}${modelHint}`);
       }
-    },
-    toggleStrategyModelMenu() {
-      if (this.loading) return;
-      this.showStrategyModelMenu = !this.showStrategyModelMenu;
-      if (this.showStrategyModelMenu) {
-        const handleClickOutside = (event) => {
-          const menu = this.$el.querySelector('.strategy-model-menu');
-          const wrapper = this.$el.querySelector('.strategy-model-wrapper');
-          if (!menu || !wrapper) return;
-          if (!wrapper.contains(event.target)) {
-            this.showStrategyModelMenu = false;
-            document.removeEventListener('click', handleClickOutside);
-          }
-        };
-        setTimeout(() => {
-          document.addEventListener('click', handleClickOutside);
-        }, 0);
-      }
-    },
-    handleStrategyModelSelect(modelType) {
-      this.showStrategyModelMenu = false;
-      this.handleQuickAnalysis('profit_forecast', modelType);
     },
     isProcessingSummary(content) {
       if (!content) return false;

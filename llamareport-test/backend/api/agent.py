@@ -125,7 +125,7 @@ class GenerateSectionRequest(BaseModel):
     year: str = Field(description="年份")
     model_type: Optional[str] = Field(
         default=None,
-        description="投资策略模型类型: correlation, clustering, all"
+        description="投资策略模型类型: all（默认，包含相关性分析、多元线性回归、聚类分析和因子分析）"
     )
 
 
@@ -207,7 +207,7 @@ async def generate_section(request: GenerateSectionRequest):
     """
     生成单个报告章节
     
-    可以单独生成财务点评、业绩指引、业务亮点或投资策略（相关性分析）章节
+    可以单独生成财务点评、业绩指引、业务亮点或投资策略（包含相关性分析、多元线性回归、聚类分析和因子分析）章节
     """
     try:
         logger.info(f"收到生成章节请求: {request.section_name}")

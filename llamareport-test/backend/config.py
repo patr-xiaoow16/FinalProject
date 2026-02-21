@@ -27,10 +27,22 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # 用于 Embedding
     LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY")
 
+    # LLM Provider 选择 (deepseek 或 claude/anthropic)
+    _llm_provider_raw = os.getenv("LLM_PROVIDER", "deepseek").lower()
+    # 支持 anthropic 作为 claude 的别名
+    LLM_PROVIDER = "claude" if _llm_provider_raw == "anthropic" else _llm_provider_raw
+    # 保存原始值用于错误消息（需要在类级别保存）
+    _original_llm_provider = _llm_provider_raw
+
     # DeepSeek 配置 (用于对话模型)
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
     DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    
+    # Anthropic Claude 配置 (用于对话模型)
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+    ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     
     # 文件配置
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 50 * 1024 * 1024))  # 50MB
@@ -66,9 +78,15 @@ class Config:
         if not cls.OPENAI_API_KEY:
             errors.append("OPENAI_API_KEY is required for embeddings")
 
-        # DeepSeek API Key (用于对话模型)
-        if not cls.DEEPSEEK_API_KEY:
-            errors.append("DEEPSEEK_API_KEY is required for chat completions")
+        # 根据 LLM_PROVIDER 验证对应的 API Key
+        if cls.LLM_PROVIDER == "deepseek":
+            if not cls.DEEPSEEK_API_KEY:
+                errors.append("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek")
+        elif cls.LLM_PROVIDER == "claude":
+            if not cls.ANTHROPIC_API_KEY:
+                errors.append("ANTHROPIC_API_KEY is required when LLM_PROVIDER=claude or anthropic")
+        else:
+            errors.append(f"LLM_PROVIDER must be 'deepseek', 'claude', or 'anthropic', got: {cls._original_llm_provider}")
 
         if errors:
             raise ValueError(f"Configuration errors: {', '.join(errors)}")
@@ -81,17 +99,27 @@ class Config:
     @classmethod
     def get_info(cls):
         """获取配置信息（不包含敏感信息）"""
+        # 根据 LLM_PROVIDER 确定模型信息
+        if cls.LLM_PROVIDER == "claude":
+            llm_model = cls.ANTHROPIC_MODEL
+            llm_provider_name = "Anthropic Claude"
+        else:
+            llm_model = cls.DEEPSEEK_MODEL
+            llm_provider_name = "DeepSeek"
+        
         return {
             "app_name": cls.APP_NAME,
             "app_version": cls.APP_VERSION,
             "debug": cls.DEBUG,
             "max_file_size": cls.MAX_FILE_SIZE,
             "allowed_extensions": list(cls.ALLOWED_EXTENSIONS),
-            "llm_provider": "DeepSeek",
-            "llm_model": cls.DEEPSEEK_MODEL,
+            "llm_provider": llm_provider_name,
+            "llm_provider_code": cls.LLM_PROVIDER,
+            "llm_model": llm_model,
             "embedding_provider": "OpenAI",
             "embedding_model": "text-embedding-3-small",
             "deepseek_configured": bool(cls.DEEPSEEK_API_KEY),
+            "anthropic_configured": bool(cls.ANTHROPIC_API_KEY),
             "openai_configured": bool(cls.OPENAI_API_KEY),
             "llama_cloud_configured": bool(cls.LLAMA_CLOUD_API_KEY),
             "uploads_dir": str(cls.UPLOADS_DIR),

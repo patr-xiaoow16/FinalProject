@@ -17,7 +17,7 @@ from models.report_models import AnnualReportAnalysis
 from agents.financial_review import generate_financial_review
 from agents.business_guidance import generate_business_guidance
 from agents.business_highlights import generate_business_highlights
-from agents.profit_forecast import generate_profit_forecast_and_valuation
+from agents.report_tools import generate_profit_forecast_and_valuation
 from agents.report_common import retrieve_financial_data, retrieve_business_data
 from agents.visualization_agent import generate_visualization_for_query
 from agents.dupont_tools import generate_dupont_analysis
@@ -177,9 +177,9 @@ class ReportAgent:
                 fn=partial(generate_profit_forecast_and_valuation, query_engine=self.query_engine),
                 name="generate_profit_forecast_and_valuation",
                 description=(
-                    "生成投资策略（相关性分析）章节。"
+                    "生成投资策略章节（包含相关性分析、多元线性回归、聚类分析和因子分析）。"
                     "需要参数: company_name(公司名称), year(年份)。"
-                    "返回指标抽取、相关性分析与投资策略结论的结构化数据。"
+                    "返回指标抽取、相关性分析、多元线性回归、因子分析、聚类分析与投资策略结论的结构化数据。"
                 )
             )
             
@@ -272,10 +272,13 @@ class ReportAgent:
    - 主要成就和里程碑
    - 业务创新和突破
 
-四、**投资策略（相关性分析）** (使用 generate_profit_forecast_and_valuation 工具)
+四、**投资策略** (使用 generate_profit_forecast_and_valuation 工具)
    - 指标自动识别与输入变量表
-   - Pearson相关性分析与核心驱动指标
-   - 投资策略结论与风险提示
+   - 相关性分析
+   - 多元线性回归分析
+   - 因子分析
+   - 聚类分析模型（客群-标的适配分组）
+   - 综合投资策略结论与风险提示
 
 五、**综合总结**
    - 基于前四部分生成综合性的投资建议
@@ -331,7 +334,7 @@ class ReportAgent:
 - **对比分析**：柱状图或分组柱状图（多维度对比）
 - **占比分析**：饼图或堆叠柱状图（结构分析）
 - **财务指标**：分组柱状图（多指标对比）
-- **相关性分析**：散点图或热力图（关联性分析）
+- **聚类分析**：分组对比图（客群-标的适配分组）
 
 ## 质量要求（严格执行）
 1. **数据准确性**
@@ -409,7 +412,7 @@ class ReportAgent:
             if user_query:
                 query = user_query
             else:
-                query = f"请生成{company_name} {year}年的完整年报分析报告,包括财务点评、业绩指引、业务亮点、投资策略（相关性分析）、以及总结。"
+                query = f"请生成{company_name} {year}年的完整年报分析报告,包括财务点评、业绩指引、业务亮点、投资策略（包含相关性分析、多元线性回归、聚类分析和因子分析）、以及总结。"
             
             # 运行 Agent
             response = await self.agent.run(query)
@@ -458,7 +461,7 @@ class ReportAgent:
                 "financial_review": "财务点评",
                 "business_guidance": "业绩指引",
                 "business_highlights": "业务亮点",
-                "profit_forecast": "投资策略（相关性分析）"
+                    "profit_forecast": "投资策略（包含相关性分析、多元线性回归、聚类分析和因子分析）"
             }
             
             section_chinese = section_map.get(section_name, section_name)
@@ -467,32 +470,41 @@ class ReportAgent:
                 query = f"{query} 优先使用{model_type}模型。"
             
             # 投资策略支持模型选择，直接调用工具避免模型参数丢失
-            if section_name == "profit_forecast" and model_type:
+            # 默认使用 "all" 执行所有分析（相关性、多元线性回归、聚类、因子分析）
+            if section_name == "profit_forecast":
+                effective_model_type = model_type or "all"
                 tool_output = await generate_profit_forecast_and_valuation(
                     company_name=company_name,
                     year=year,
                     query_engine=self.query_engine,
-                    model_type=model_type
+                    model_type=effective_model_type
                 )
                 summary_text = None
                 if isinstance(tool_output, dict):
-                    conclusion = tool_output.get("strategy_conclusion") or {}
-                    clustering = tool_output.get("clustering_model") or {}
-                    parts = []
-                    short_term = conclusion.get("short_term")
-                    long_term = conclusion.get("long_term")
-                    risk_control = conclusion.get("risk_control")
-                    if short_term:
-                        parts.append(f"短期配置：{short_term}")
-                    if long_term:
-                        parts.append(f"长期配置：{long_term}")
-                    if risk_control:
-                        parts.append(f"风险管控：{risk_control}")
-                    if model_type == "clustering":
-                        clustering_conclusion = clustering.get("conclusion") if isinstance(clustering, dict) else None
-                        if isinstance(clustering_conclusion, dict) and clustering_conclusion.get("current_position"):
-                            parts.append(clustering_conclusion.get("current_position"))
-                    summary_text = "；".join([p for p in parts if p])
+                    # 优先使用综合洞察
+                    comprehensive_insight = tool_output.get("comprehensive_insight")
+                    if comprehensive_insight:
+                        summary_text = comprehensive_insight
+                    else:
+                        # 如果没有综合洞察，使用策略结论
+                        conclusion = tool_output.get("strategy_conclusion") or {}
+                        parts = []
+                        short_term = conclusion.get("short_term")
+                        long_term = conclusion.get("long_term")
+                        risk_control = conclusion.get("risk_control")
+                        if short_term:
+                            parts.append(f"短期配置：{short_term}")
+                        if long_term:
+                            parts.append(f"长期配置：{long_term}")
+                        if risk_control:
+                            parts.append(f"风险管控：{risk_control}")
+                        # 如果有聚类分析结果，也加入
+                        clustering = tool_output.get("clustering_model") or {}
+                        if clustering:
+                            clustering_conclusion = clustering.get("conclusion") if isinstance(clustering, dict) else None
+                            if isinstance(clustering_conclusion, dict) and clustering_conclusion.get("current_position"):
+                                parts.append(f"聚类定位：{clustering_conclusion.get('current_position')}")
+                        summary_text = "；".join([p for p in parts if p])
                 return {
                     "status": "success",
                     "section_name": section_name,
@@ -837,8 +849,7 @@ class ReportAgent:
                                             summary_text = "；".join(snippet_list)
                                 elif tool_name == "generate_profit_forecast_and_valuation":
                                     conclusions = raw_output.get("strategy_conclusion") or {}
-                                    correlation_results = raw_output.get("correlation_results") or []
-                                    data_sufficiency = raw_output.get("data_sufficiency") or {}
+                                    clustering_model = raw_output.get("clustering_model") or {}
 
                                     parts = []
                                     short_term = conclusions.get("short_term")
@@ -851,26 +862,13 @@ class ReportAgent:
                                     if risk_control:
                                         parts.append(f"风险管控：{risk_control}")
 
-                                    corr_items = []
-                                    for item in correlation_results:
-                                        if not isinstance(item, dict):
-                                            continue
-                                        r_value = item.get("correlation")
-                                        if isinstance(r_value, (int, float)):
-                                            corr_items.append((abs(r_value), r_value, item))
-                                    if corr_items:
-                                        corr_items.sort(reverse=True)
-                                        corr_summaries = []
-                                        for _, r_value, item in corr_items[:2]:
-                                            target = item.get("target_metric") or "目标指标"
-                                            driver = item.get("driver_metric") or "驱动指标"
-                                            significance = item.get("significance")
-                                            corr_label = f"{r_value:+.2f}"
-                                            if significance:
-                                                corr_label = f"{corr_label}/{significance}"
-                                            corr_summaries.append(f"{target}-{driver}({corr_label})")
-                                        if corr_summaries:
-                                            parts.append("相关性要点：" + "；".join(corr_summaries))
+                                    # 聚类分析结果摘要
+                                    if clustering_model and isinstance(clustering_model, dict):
+                                        group_results = clustering_model.get("group_results") or []
+                                        if group_results:
+                                            group_names = [g.get("group_name", "") for g in group_results if isinstance(g, dict)]
+                                            if group_names:
+                                                parts.append(f"聚类分组：{', '.join(group_names)}")
 
                                     if isinstance(data_sufficiency, dict) and data_sufficiency.get("is_sufficient") is False:
                                         reason = data_sufficiency.get("reason") or "样本不足"

@@ -214,6 +214,248 @@ def build_correlation_results(
     return results, data_sufficiency
 
 
+def build_multiple_linear_regression(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    default_period: Optional[str]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    构建多元线性回归分析结果
+    
+    Args:
+        indicator_extraction: 指标提取列表
+        variable_table: 变量表
+        default_period: 默认期间
+    
+    Returns:
+        (回归结果字典, 数据充分性字典)
+    """
+    series_map = _build_metric_series(indicator_extraction, variable_table, default_period)
+    targets = [name for name, info in series_map.items() if info.get("role") == "因变量"]
+    drivers = [name for name, info in series_map.items() if info.get("role") == "自变量"]
+    
+    if not targets or not drivers or len(drivers) < 2:
+        return {
+            "target_metric": targets[0] if targets else None,
+            "independent_variables": drivers,
+            "coefficients": {},
+            "r_squared": None,
+            "interpretation": "自变量数量不足，无法进行多元线性回归分析"
+        }, {
+            "is_sufficient": False,
+            "reason": "自变量数量不足（至少需要2个自变量）",
+            "sample_description": None
+        }
+    
+    # 找到共同的时间点
+    target = targets[0]
+    target_series = series_map[target]["series"]
+    shared_periods = set(target_series.keys())
+    
+    for driver in drivers:
+        driver_series = series_map[driver]["series"]
+        shared_periods = shared_periods & set(driver_series.keys())
+    
+    shared_periods = sorted(shared_periods)
+    
+    if len(shared_periods) < 3:
+        return {
+            "target_metric": target,
+            "independent_variables": drivers,
+            "coefficients": {},
+            "r_squared": None,
+            "interpretation": "样本数量不足，无法进行多元线性回归分析"
+        }, {
+            "is_sufficient": False,
+            "reason": f"共同样本数量不足（当前{len(shared_periods)}个，至少需要3个）",
+            "sample_description": f"可用样本数：{len(shared_periods)}"
+        }
+    
+    # 构建回归数据
+    y = [target_series[p] for p in shared_periods]
+    X = []
+    for driver in drivers:
+        driver_series = series_map[driver]["series"]
+        X.append([driver_series[p] for p in shared_periods])
+    
+    # 简单的多元线性回归（使用最小二乘法）
+    try:
+        import numpy as np
+        X_matrix = np.array(X).T
+        y_vector = np.array(y)
+        
+        # 添加截距项
+        X_with_intercept = np.column_stack([np.ones(len(y_vector)), X_matrix])
+        
+        # 计算回归系数
+        coefficients = np.linalg.lstsq(X_with_intercept, y_vector, rcond=None)[0]
+        
+        # 计算R²
+        y_pred = X_with_intercept @ coefficients
+        ss_res = np.sum((y_vector - y_pred) ** 2)
+        ss_tot = np.sum((y_vector - np.mean(y_vector)) ** 2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else None
+        
+        # 构建系数字典
+        coef_dict = {"intercept": float(coefficients[0])}
+        for i, driver in enumerate(drivers):
+            coef_dict[driver] = float(coefficients[i + 1])
+        
+        interpretation = f"多元线性回归模型R²为{r_squared:.3f}" if r_squared else "无法计算R²"
+        
+        return {
+            "target_metric": target,
+            "independent_variables": drivers,
+            "coefficients": coef_dict,
+            "r_squared": float(r_squared) if r_squared is not None else None,
+            "interpretation": interpretation,
+            "data_points": len(shared_periods)
+        }, {
+            "is_sufficient": True,
+            "reason": None,
+            "sample_description": f"使用{len(shared_periods)}个样本进行回归分析"
+        }
+    except Exception as e:
+        logger.warning(f"多元线性回归计算失败: {str(e)}")
+        return {
+            "target_metric": target,
+            "independent_variables": drivers,
+            "coefficients": {},
+            "r_squared": None,
+            "interpretation": f"回归分析计算失败: {str(e)}"
+        }, {
+            "is_sufficient": False,
+            "reason": f"回归计算失败: {str(e)}",
+            "sample_description": None
+        }
+
+
+def build_factor_analysis(
+    indicator_extraction: List[Dict[str, Any]],
+    variable_table: List[Dict[str, Any]],
+    default_period: Optional[str]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    构建因子分析结果
+    
+    Args:
+        indicator_extraction: 指标提取列表
+        variable_table: 变量表
+        default_period: 默认期间
+    
+    Returns:
+        (因子分析结果字典, 数据充分性字典)
+    """
+    series_map = _build_metric_series(indicator_extraction, variable_table, default_period)
+    all_metrics = [name for name, info in series_map.items() if info.get("role") == "自变量"]
+    
+    if len(all_metrics) < 3:
+        return {
+            "factors": [],
+            "factor_loadings": {},
+            "variance_explained": {},
+            "interpretation": "指标数量不足，无法进行因子分析"
+        }, {
+            "is_sufficient": False,
+            "reason": "自变量数量不足（至少需要3个指标）",
+            "sample_description": None
+        }
+    
+    # 找到共同的时间点
+    shared_periods = None
+    for metric in all_metrics:
+        metric_series = series_map[metric]["series"]
+        if shared_periods is None:
+            shared_periods = set(metric_series.keys())
+        else:
+            shared_periods = shared_periods & set(metric_series.keys())
+    
+    shared_periods = sorted(shared_periods) if shared_periods else []
+    
+    if len(shared_periods) < 3:
+        return {
+            "factors": [],
+            "factor_loadings": {},
+            "variance_explained": {},
+            "interpretation": "样本数量不足，无法进行因子分析"
+        }, {
+            "is_sufficient": False,
+            "reason": f"共同样本数量不足（当前{len(shared_periods)}个，至少需要3个）",
+            "sample_description": f"可用样本数：{len(shared_periods)}"
+        }
+    
+    # 构建数据矩阵
+    try:
+        import numpy as np
+        data_matrix = []
+        for metric in all_metrics:
+            metric_series = series_map[metric]["series"]
+            data_matrix.append([metric_series[p] for p in shared_periods])
+        
+        data_array = np.array(data_matrix)
+        
+        # 标准化数据
+        data_std = (data_array - np.mean(data_array, axis=1, keepdims=True)) / (np.std(data_array, axis=1, keepdims=True) + 1e-8)
+        
+        # 计算相关系数矩阵
+        corr_matrix = np.corrcoef(data_std)
+        
+        # 简单的因子分析（主成分分析）
+        eigenvalues, eigenvectors = np.linalg.eig(corr_matrix)
+        
+        # 选择特征值大于1的因子
+        significant_factors = [i for i, val in enumerate(eigenvalues) if val > 1.0]
+        
+        if not significant_factors:
+            # 如果没有特征值>1的因子，选择前2个
+            significant_factors = [0, 1] if len(eigenvalues) >= 2 else [0]
+        
+        factors = []
+        factor_loadings = {}
+        variance_explained = {}
+        
+        total_variance = np.sum(eigenvalues)
+        
+        for i, factor_idx in enumerate(significant_factors[:3]):  # 最多3个因子
+            factor_name = f"因子{i+1}"
+            factors.append(factor_name)
+            
+            # 因子载荷
+            loadings = {}
+            for j, metric in enumerate(all_metrics):
+                loadings[metric] = float(eigenvectors[j, factor_idx])
+            factor_loadings[factor_name] = loadings
+            
+            # 解释的方差比例
+            variance_explained[factor_name] = float(eigenvalues[factor_idx] / total_variance) if total_variance > 0 else 0.0
+        
+        interpretation = f"提取了{len(factors)}个主要因子，累计解释方差{sum(variance_explained.values()):.1%}"
+        
+        return {
+            "factors": factors,
+            "factor_loadings": factor_loadings,
+            "variance_explained": variance_explained,
+            "interpretation": interpretation,
+            "data_points": len(shared_periods)
+        }, {
+            "is_sufficient": True,
+            "reason": None,
+            "sample_description": f"使用{len(shared_periods)}个样本进行因子分析"
+        }
+    except Exception as e:
+        logger.warning(f"因子分析计算失败: {str(e)}")
+        return {
+            "factors": [],
+            "factor_loadings": {},
+            "variance_explained": {},
+            "interpretation": f"因子分析计算失败: {str(e)}"
+        }, {
+            "is_sufficient": False,
+            "reason": f"因子分析计算失败: {str(e)}",
+            "sample_description": None
+        }
+
+
 def create_query_engine_tool(query_engine, name: str, description: str) -> QueryEngineTool:
     """
     创建查询引擎工具

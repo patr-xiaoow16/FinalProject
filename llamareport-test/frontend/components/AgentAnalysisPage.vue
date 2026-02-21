@@ -1388,8 +1388,173 @@ export default {
                 })
                 console.log('✅ [AgentAnalysisPage] 添加可视化数据（从工具调用）')
               } else if (toolName === 'generate_profit_forecast_and_valuation' && toolOutput) {
-                // 盈利预测数据可以存储在其他地方或合并到结构化数据中
-                console.log('✅ [AgentAnalysisPage] 收到盈利预测数据')
+                // 处理投资策略数据（包含相关性分析、多元线性回归、聚类、因子分析）
+                console.log('✅ [AgentAnalysisPage] 收到投资策略数据')
+                
+                // 提取综合洞察文本，显示在智能问答界面
+                const comprehensiveInsight = toolOutput.comprehensive_insight || toolOutput.strategy_conclusion
+                if (comprehensiveInsight) {
+                  let insightText = ''
+                  if (typeof comprehensiveInsight === 'string') {
+                    insightText = comprehensiveInsight
+                  } else if (typeof comprehensiveInsight === 'object') {
+                    // 如果是对象，格式化显示
+                    const parts = []
+                    if (comprehensiveInsight.short_term) parts.push(`**短期配置：** ${comprehensiveInsight.short_term}`)
+                    if (comprehensiveInsight.long_term) parts.push(`**长期配置：** ${comprehensiveInsight.long_term}`)
+                    if (comprehensiveInsight.risk_control) parts.push(`**风险管控：** ${comprehensiveInsight.risk_control}`)
+                    if (Array.isArray(comprehensiveInsight.key_signals) && comprehensiveInsight.key_signals.length > 0) {
+                      parts.push(`**关键信号：**\n${comprehensiveInsight.key_signals.map(s => `- ${s}`).join('\n')}`)
+                    }
+                    insightText = parts.join('\n\n')
+                  }
+                  
+                  // 将洞察添加到answer中
+                  if (insightText && this.answer) {
+                    this.answer = `${this.answer}\n\n## 投资策略综合洞察\n\n${insightText}`
+                  } else if (insightText) {
+                    this.answer = `## 投资策略分析\n\n${insightText}`
+                  }
+                }
+                
+                // 生成可视化视图
+                // 1. 相关性分析可视化
+                if (toolOutput.correlation_results && Array.isArray(toolOutput.correlation_results) && toolOutput.correlation_results.length > 0) {
+                  const correlationData = toolOutput.correlation_results
+                  const labels = correlationData.map(r => `${r.target_metric} vs ${r.driver_metric}`)
+                  const correlations = correlationData.map(r => r.correlation || 0)
+                  
+                  this.visualizations.push({
+                    id: `investment-strategy-correlation-${Date.now()}`,
+                    question: '相关性分析结果',
+                    source: 'investment_strategy',
+                    data: {
+                      has_visualization: true,
+                      visualization_type: 'plotly',
+                      chart_config: {
+                        chart_type: 'bar',
+                        traces: [{
+                          type: 'bar',
+                          name: '相关系数',
+                          x: labels,
+                          y: correlations,
+                          marker: {
+                            color: correlations.map(c => c >= 0 ? '#10b981' : '#ef4444')
+                          }
+                        }],
+                        layout: {
+                          title: '相关性分析结果',
+                          xaxis_title: '指标对',
+                          yaxis_title: '相关系数',
+                          yaxis: { range: [-1, 1] }
+                        }
+                      }
+                    }
+                  })
+                }
+                
+                // 2. 多元线性回归可视化
+                if (toolOutput.multiple_linear_regression && toolOutput.multiple_linear_regression.coefficients) {
+                  const regression = toolOutput.multiple_linear_regression
+                  const coefs = regression.coefficients || {}
+                  const variables = Object.keys(coefs).filter(k => k !== 'intercept')
+                  const values = variables.map(v => coefs[v])
+                  
+                  if (variables.length > 0) {
+                    this.visualizations.push({
+                      id: `investment-strategy-regression-${Date.now()}`,
+                      question: '多元线性回归系数',
+                      source: 'investment_strategy',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [{
+                            type: 'bar',
+                            name: '回归系数',
+                            x: variables,
+                            y: values,
+                            marker: {
+                              color: values.map(v => v >= 0 ? '#667eea' : '#ef4444')
+                            }
+                          }],
+                          layout: {
+                            title: `多元线性回归分析（R²=${regression.r_squared?.toFixed(3) || 'N/A'}）`,
+                            xaxis_title: '自变量',
+                            yaxis_title: '回归系数'
+                          }
+                        }
+                      }
+                    })
+                  }
+                }
+                
+                // 3. 因子分析可视化
+                if (toolOutput.factor_analysis && toolOutput.factor_analysis.factors && toolOutput.factor_analysis.factors.length > 0) {
+                  const factorAnalysis = toolOutput.factor_analysis
+                  const factors = factorAnalysis.factors || []
+                  const varianceExplained = factorAnalysis.variance_explained || {}
+                  const varianceValues = factors.map(f => varianceExplained[f] || 0)
+                  
+                  this.visualizations.push({
+                    id: `investment-strategy-factor-${Date.now()}`,
+                    question: '因子分析结果',
+                    source: 'investment_strategy',
+                    data: {
+                      has_visualization: true,
+                      visualization_type: 'plotly',
+                      chart_config: {
+                        chart_type: 'bar',
+                        traces: [{
+                          type: 'bar',
+                          name: '解释方差比例',
+                          x: factors,
+                          y: varianceValues,
+                          marker: { color: '#764ba2' }
+                        }],
+                        layout: {
+                          title: '因子分析 - 解释方差比例',
+                          xaxis_title: '因子',
+                          yaxis_title: '解释方差比例',
+                          yaxis: { tickformat: '.1%' }
+                        }
+                      }
+                    }
+                  })
+                }
+                
+                // 4. 聚类分析可视化（如果存在）
+                if (toolOutput.clustering_model && toolOutput.clustering_model.group_results) {
+                  const clustering = toolOutput.clustering_model
+                  const groups = clustering.group_results || []
+                  const groupNames = groups.map(g => g.group_name || '未知组')
+                  
+                  this.visualizations.push({
+                    id: `investment-strategy-clustering-${Date.now()}`,
+                    question: '聚类分析结果',
+                    source: 'investment_strategy',
+                    data: {
+                      has_visualization: true,
+                      visualization_type: 'plotly',
+                      chart_config: {
+                        chart_type: 'bar',
+                        traces: [{
+                          type: 'bar',
+                          name: '分组',
+                          x: groupNames,
+                          y: groups.map((_, i) => i + 1),
+                          marker: { color: '#f59e0b' }
+                        }],
+                        layout: {
+                          title: '聚类分析 - 投资组合分组',
+                          xaxis_title: '分组',
+                          yaxis_title: '组别编号'
+                        }
+                      }
+                    }
+                  })
+                }
               }
             })
           }

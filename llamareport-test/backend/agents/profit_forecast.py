@@ -1,5 +1,5 @@
 """
-投资策略（相关性分析）章节生成工具
+投资策略（聚类分析）章节生成工具
 """
 
 import logging
@@ -9,7 +9,7 @@ from llama_index.core import Settings
 from llama_index.core.llms import ChatMessage
 from models.report_models import ProfitForecastAndValuation
 
-from agents.report_common import _validate_and_clean_data, build_correlation_results
+from agents.report_common import _validate_and_clean_data
 
 logger = logging.getLogger(__name__)
 
@@ -21,23 +21,24 @@ async def generate_profit_forecast_and_valuation(
     model_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    生成投资策略章节（相关性分析模型）
+    生成投资策略章节（聚类分析模型）
     
     包括:
     1. 指标自动识别与抽取
     2. 输入变量表构建
-    3. 相关性分析与结论输出
+    3. 聚类分析与结论输出
     
     Args:
         company_name: 公司名称
         year: 年份
         query_engine: 查询引擎
+        model_type: 模型类型，目前只支持"clustering"（聚类分析）
     
     Returns:
-        投资策略（相关性分析）的结构化数据
+        投资策略（聚类分析）的结构化数据
     """
     try:
-        logger.info(f"开始生成投资策略（相关性分析）: {company_name} {year}年")
+        logger.info(f"开始生成投资策略（聚类分析）: {company_name} {year}年")
         
         # 先检索表格，再检索年报文本（同一份年报）
         table_query = (
@@ -58,12 +59,12 @@ async def generate_profit_forecast_and_valuation(
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
-        normalized_model = (model_type or "all").lower()
-        if normalized_model not in {"correlation", "clustering", "all"}:
-            normalized_model = "all"
+        normalized_model = (model_type or "clustering").lower()
+        if normalized_model not in {"clustering"}:
+            normalized_model = "clustering"
 
         prompt = f"""
-作为资深投资分析师，请基于以下数据，为{company_name}生成“投资策略-相关性分析模型”。
+作为资深投资分析师，请基于以下数据，为{company_name}生成"投资策略-聚类分析模型"。
 
 ## 数据来源
 以下数据来自年报披露与相关指标说明：
@@ -71,7 +72,7 @@ async def generate_profit_forecast_and_valuation(
 {str(forecast_data)}
 
 ## 分析要求
-请只完成“指标抽取与结构化”，不要计算相关性，也不要写投资策略结论：
+请只完成"指标抽取与结构化"，不要写投资策略结论：
 
 ### 1. 指标自动识别与抽取（严格口径）
 仅允许识别并抽取以下指标（名称必须与下列一致，不要扩展或改写）：
@@ -85,17 +86,12 @@ async def generate_profit_forecast_and_valuation(
 输出每个指标的分类、变量角色（因变量/自变量）、取值、单位、期间和来源片段。
 
 ### 2. 输入变量表
-- 将指标整理为“输入变量表”（变量类型、具体指标、取值、期间、单位）
+- 将指标整理为"输入变量表"（变量类型、具体指标、取值、期间、单位）
 - 仅使用本年报中的数据；若表格内存在多个年份列，请一并抽取并标注period
 
 ### 3. 相关性与结论（不要生成）
 - "correlation_results"必须输出空数组[]
 - "strategy_conclusion"中的字段保持为空字符串或空数组
-
-### 4. 模型选择约束（由后端控制）
-- model_type=correlation：只做相关性分析，不生成聚类模型
-- model_type=clustering：只做聚类模型，不生成相关性结果
-- model_type=all：相关性与聚类模型均可生成
 
 ## ⚠️ 严格输出要求（必须遵守）
 你必须输出一个有效的JSON对象，且仅输出JSON，不要有任何其他文字说明。
@@ -160,7 +156,7 @@ async def generate_profit_forecast_and_valuation(
         try:
             sllm = llm.as_structured_llm(ProfitForecastAndValuation)
             raw_response = await sllm.achat([
-                ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
+                ChatMessage(role="system", content="你是一个专业的投资分析师,擅长聚类分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
                 ChatMessage(role="user", content=prompt)
             ])
             
@@ -218,7 +214,7 @@ async def generate_profit_forecast_and_valuation(
             # 回退到普通LLM输出
             try:
                 normal_response = await llm.achat([
-                    ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
+                    ChatMessage(role="system", content="你是一个专业的投资分析师,擅长聚类分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
                     ChatMessage(role="user", content=prompt)
                 ])
                 
@@ -256,7 +252,7 @@ async def generate_profit_forecast_and_valuation(
                     "content": content if 'content' in locals() else str(fallback_error)
                 }
 
-        logger.info(f"✅ 投资策略（相关性分析）生成成功")
+        logger.info(f"✅ 投资策略（聚类分析）生成成功")
         
         # 处理响应 - 确保返回字典格式
         result_dict = None
@@ -309,103 +305,9 @@ async def generate_profit_forecast_and_valuation(
             if isinstance(data_sufficiency, dict) and not isinstance(data_sufficiency.get("is_sufficient"), bool):
                 data_sufficiency["is_sufficient"] = False
 
-        # 使用代码计算相关性（优先于LLM填充）
+        # 生成聚类分析模型（从表格+年报文本自动填充）
         if isinstance(result_dict, dict):
-            if normalized_model in {"correlation", "all"}:
-                correlation_results = result_dict.get("correlation_results") or []
-                data_sufficiency = result_dict.get("data_sufficiency")
-                if not correlation_results:
-                    computed_results, computed_sufficiency = build_correlation_results(
-                        result_dict.get("indicator_extraction") or [],
-                        result_dict.get("variable_table") or [],
-                        year
-                    )
-                    result_dict["correlation_results"] = computed_results
-                    result_dict["data_sufficiency"] = data_sufficiency or computed_sufficiency
-                elif not data_sufficiency:
-                    _, computed_sufficiency = build_correlation_results(
-                        result_dict.get("indicator_extraction") or [],
-                        result_dict.get("variable_table") or [],
-                        year
-                    )
-                    result_dict["data_sufficiency"] = computed_sufficiency
-
-                # 基于计算结果生成洞察（只做结论，不再生成数值）
-                strategy_conclusion = result_dict.get("strategy_conclusion") or {}
-                has_conclusion = any([
-                    bool(strategy_conclusion.get("short_term")),
-                    bool(strategy_conclusion.get("long_term")),
-                    bool(strategy_conclusion.get("risk_control")),
-                    bool(strategy_conclusion.get("key_signals"))
-                ])
-                if not has_conclusion:
-                    import json
-                    insight_prompt = f"""
-你是专业投资分析师，请仅基于给定的相关性结果与数据充分性说明，生成投资策略结论。
-不得新增或编造任何数值，不得虚构相关系数。
-
-### 相关性结果
-{json.dumps(result_dict.get("correlation_results") or [], ensure_ascii=False)}
-
-### 数据充分性
-{json.dumps(result_dict.get("data_sufficiency") or {}, ensure_ascii=False)}
-
-### 输入变量表（供命名参考）
-{json.dumps(result_dict.get("variable_table") or [], ensure_ascii=False)}
-
-### 输出要求
-必须输出JSON且只输出JSON，结构如下：
-{{
-  "strategy_conclusion": {{
-    "short_term": "短期配置结论",
-    "long_term": "长期配置结论",
-    "risk_control": "风险管控结论",
-    "key_signals": ["关键信号1", "关键信号2"]
-  }},
-  "notes": "补充说明（可选）"
-}}
-"""
-                    try:
-                        insight_response = await llm.achat([
-                            ChatMessage(role="system", content="你是一个专业的投资分析师，擅长相关性分析后的策略总结。你必须只输出JSON。"),
-                            ChatMessage(role="user", content=insight_prompt)
-                        ])
-                        if hasattr(insight_response, 'message'):
-                            insight_content = insight_response.message.content if hasattr(insight_response.message, 'content') else str(insight_response.message)
-                        else:
-                            insight_content = str(insight_response)
-                        import re
-                        json_match = re.search(r'\{[\s\S]*\}', insight_content)
-                        if json_match:
-                            parsed = json.loads(json_match.group(0))
-                            conclusion = parsed.get("strategy_conclusion") if isinstance(parsed, dict) else None
-                            if isinstance(conclusion, dict):
-                                result_dict["strategy_conclusion"] = {
-                                    "short_term": conclusion.get("short_term") or "",
-                                    "long_term": conclusion.get("long_term") or "",
-                                    "risk_control": conclusion.get("risk_control") or "",
-                                    "key_signals": conclusion.get("key_signals") or []
-                                }
-                            if isinstance(parsed, dict) and parsed.get("notes"):
-                                result_dict["notes"] = parsed.get("notes")
-                    except Exception as insight_error:
-                        logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 洞察生成失败: {str(insight_error)}")
-            else:
-                result_dict["correlation_results"] = []
-                result_dict["strategy_conclusion"] = {
-                    "short_term": "",
-                    "long_term": "",
-                    "risk_control": "",
-                    "key_signals": []
-                }
-                result_dict["data_sufficiency"] = {
-                    "is_sufficient": False,
-                    "reason": "相关性模型未启用",
-                    "sample_description": None
-                }
-
-            # 生成聚类分析模型（从表格+年报文本自动填充）
-            if normalized_model in {"clustering", "all"} and not result_dict.get("clustering_model"):
+            if normalized_model == "clustering" and not result_dict.get("clustering_model"):
                 import json
                 clustering_prompt = f"""
 你是专业投研分析师，请基于以下数据生成“聚类分析模型（客群-标的适配分组）”。
@@ -488,11 +390,11 @@ async def generate_profit_forecast_and_valuation(
         return result_dict
         
     except Exception as e:
-        logger.error(f"❌ 生成投资策略（相关性分析）失败: {str(e)}")
+        logger.error(f"❌ 生成投资策略（聚类分析）失败: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return {
-            "error": f"生成投资策略（相关性分析）失败: {str(e)}",
+            "error": f"生成投资策略（聚类分析）失败: {str(e)}",
             "company_name": company_name,
             "year": year
         }

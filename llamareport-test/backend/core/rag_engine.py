@@ -12,6 +12,7 @@ from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.deepseek import DeepSeek
+from llama_index.llms.anthropic import Anthropic
 from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
 
@@ -52,26 +53,63 @@ class RAGEngine:
         try:
             # 获取 API Keys
             openai_api_key = os.getenv("OPENAI_API_KEY")
-            deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+            llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+            
+            # 支持 anthropic 作为 claude 的别名
+            if llm_provider == "anthropic":
+                llm_provider = "claude"
+                logger.info("ℹ️ 检测到 LLM_PROVIDER=anthropic，自动转换为 claude")
 
             if not openai_api_key:
                 logger.warning("⚠️ OPENAI_API_KEY未设置，Embedding功能将受限")
                 return False
 
-            if not deepseek_api_key:
-                logger.warning("⚠️ DEEPSEEK_API_KEY未设置，对话功能将受限")
-                return False
-
-            # 设置LLM - 使用 DeepSeek 专用集成
-            deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
-            Settings.llm = DeepSeek(
-                model=deepseek_model,
-                api_key=deepseek_api_key,
-                temperature=0.1
-            )
-
-            logger.info(f"✅ DeepSeek LLM配置成功 - 模型: {deepseek_model}")
+            # 根据 LLM_PROVIDER 选择并配置 LLM
+            if llm_provider == "claude":
+                # 使用 Anthropic Claude
+                anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+                if not anthropic_api_key:
+                    logger.warning("⚠️ ANTHROPIC_API_KEY未设置，对话功能将受限")
+                    return False
+                
+                anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+                anthropic_base_url = os.getenv("ANTHROPIC_BASE_URL")
+                
+                # 构建 Anthropic 初始化参数
+                anthropic_kwargs = {
+                    "model": anthropic_model,
+                    "api_key": anthropic_api_key,
+                    "temperature": 0.1,
+                    "max_tokens": 4096
+                }
+                
+                # 如果设置了自定义 base_url（中转站），添加该参数
+                if anthropic_base_url:
+                    anthropic_kwargs["base_url"] = anthropic_base_url
+                    logger.info(f"ℹ️  使用自定义 Base URL (中转站): {anthropic_base_url}")
+                
+                Settings.llm = Anthropic(**anthropic_kwargs)
+                
+                logger.info(f"✅ Anthropic Claude LLM配置成功 - 模型: {anthropic_model}")
+                llm_name = "Anthropic Claude"
+                
+            else:
+                # 默认使用 DeepSeek
+                deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+                if not deepseek_api_key:
+                    logger.warning("⚠️ DEEPSEEK_API_KEY未设置，对话功能将受限")
+                    return False
+                
+                deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+                
+                Settings.llm = DeepSeek(
+                    model=deepseek_model,
+                    api_key=deepseek_api_key,
+                    temperature=0.1
+                )
+                
+                logger.info(f"✅ DeepSeek LLM配置成功 - 模型: {deepseek_model}")
+                llm_name = "DeepSeek"
 
             # 设置嵌入模型 - 继续使用 OpenAI
             Settings.embed_model = OpenAIEmbedding(
@@ -80,7 +118,7 @@ class RAGEngine:
             )
 
             logger.info("✅ OpenAI Embedding配置成功")
-            logger.info("✅ LlamaIndex配置成功 (DeepSeek LLM + OpenAI Embedding)")
+            logger.info(f"✅ LlamaIndex配置成功 ({llm_name} LLM + OpenAI Embedding)")
             return True
 
         except Exception as e:
@@ -119,7 +157,13 @@ class RAGEngine:
             
             if not self.llama_index_ready:
                 logger.error("❌ LlamaIndex未就绪，无法加载索引")
-                logger.error("   请检查 OPENAI_API_KEY 和 DEEPSEEK_API_KEY 环境变量")
+                llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+                if llm_provider == "anthropic":
+                    llm_provider = "claude"
+                if llm_provider == "claude":
+                    logger.error("   请检查 OPENAI_API_KEY 和 ANTHROPIC_API_KEY 环境变量")
+                else:
+                    logger.error("   请检查 OPENAI_API_KEY 和 DEEPSEEK_API_KEY 环境变量")
                 return False
 
             if not self.chroma_collection:
@@ -520,8 +564,15 @@ class RAGEngine:
             
             if not self.llama_index_ready:
                 print("❌ RAG系统未就绪")
+                llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+                if llm_provider == "anthropic":
+                    llm_provider = "claude"
+                if llm_provider == "claude":
+                    error_msg = "RAG系统未就绪，请检查OPENAI_API_KEY和ANTHROPIC_API_KEY配置。"
+                else:
+                    error_msg = "RAG系统未就绪，请检查OPENAI_API_KEY和DEEPSEEK_API_KEY配置。"
                 return {
-                    'answer': "RAG系统未就绪，请检查OPENAI_API_KEY配置。",
+                    'answer': error_msg,
                     'sources': [],
                     'error': True
                 }

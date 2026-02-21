@@ -171,7 +171,7 @@ class BusinessHighlights(BaseModel):
     )
 
 
-# ==================== 投资策略模型（相关性分析） ====================
+# ==================== 投资策略模型（聚类分析） ====================
 
 class StrategyIndicator(BaseModel):
     """指标抽取项"""
@@ -252,12 +252,12 @@ class ClusteringModel(BaseModel):
 
 
 class ProfitForecastAndValuation(BaseModel):
-    """投资策略（相关性分析模型，第四部分）"""
+    """投资策略（聚类分析模型，第四部分）"""
     indicator_extraction: List[StrategyIndicator] = Field(description="指标自动识别与抽取结果")
     variable_table: List[VariableTableRow] = Field(description="输入变量表")
-    correlation_results: List[CorrelationResult] = Field(description="相关系数矩阵核心结果")
+    correlation_results: Optional[List[CorrelationResult]] = Field(default=[], description="相关系数矩阵核心结果（已废弃，保留用于兼容）")
     strategy_conclusion: StrategyConclusion = Field(description="核心结论与应用")
-    data_sufficiency: Optional[DataSufficiency] = Field(default=None, description="数据充分性说明")
+    data_sufficiency: Optional[DataSufficiency] = Field(default=None, description="数据充分性说明（已废弃，保留用于兼容）")
     clustering_model: Optional[ClusteringModel] = Field(default=None, description="聚类分析模型（客群-标的适配分组）")
     notes: Optional[str] = Field(default=None, description="补充说明")
 
@@ -278,7 +278,7 @@ class AnnualReportAnalysis(BaseModel):
     financial_review: FinancialReview = Field(description="一、财务点评")
     business_guidance: BusinessGuidance = Field(description="二、业绩指引")
     business_highlights: BusinessHighlights = Field(description="三、业务亮点")
-    profit_forecast_and_valuation: ProfitForecastAndValuation = Field(description="四、投资策略（相关性分析）")
+    profit_forecast_and_valuation: ProfitForecastAndValuation = Field(description="四、投资策略（聚类分析）")
     
     # 总结
     overall_summary: str = Field(description="五、总结 - 综合所有部分的总结")

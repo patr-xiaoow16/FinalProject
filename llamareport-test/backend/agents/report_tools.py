@@ -18,7 +18,11 @@ from models.report_models import (
     FinancialStatementTables
 )
 from agents.visualization_agent import generate_visualization_for_query
-from agents.report_common import build_correlation_results
+from agents.report_common import (
+    build_correlation_results,
+    build_multiple_linear_regression,
+    build_factor_analysis
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1667,23 +1671,28 @@ async def generate_profit_forecast_and_valuation(
     model_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    生成投资策略章节（相关性分析模型）
+    生成投资策略章节（包含四个分析：相关性分析、多元线性回归、聚类分析、因子分析）
     
     包括:
     1. 指标自动识别与抽取
     2. 输入变量表构建
-    3. 相关性分析与结论输出
+    3. 相关性分析
+    4. 多元线性回归分析
+    5. 因子分析
+    6. 聚类分析
+    7. 综合投资策略结论
     
     Args:
         company_name: 公司名称
         year: 年份
         query_engine: 查询引擎
+        model_type: 模型类型，默认为"all"（执行所有分析）
     
     Returns:
-        投资策略（相关性分析）的结构化数据
+        投资策略（包含四个分析）的结构化数据
     """
     try:
-        logger.info(f"开始生成投资策略（相关性分析）: {company_name} {year}年")
+        logger.info(f"开始生成投资策略（包含相关性分析、多元线性回归、聚类分析、因子分析）: {company_name} {year}年")
         
         # 先检索表格，再检索年报文本（同一份年报）
         table_query = (
@@ -1704,44 +1713,92 @@ async def generate_profit_forecast_and_valuation(
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
+        # 默认执行所有分析（相关性、多元线性回归、聚类、因子分析）
         normalized_model = (model_type or "all").lower()
         if normalized_model not in {"correlation", "clustering", "all"}:
             normalized_model = "all"
 
         prompt = f"""
-作为资深投资分析师，请基于以下数据，为{company_name}生成“投资策略-相关性分析模型”。
+作为资深投资分析师，请基于以下数据，为{company_name}生成"投资策略分析"的指标抽取与结构化数据。
 
 ## 数据来源
 以下数据来自年报披露与相关指标说明：
 
 {str(forecast_data)}
 
-## 分析要求
-请只完成“指标抽取与结构化”，不要计算相关性，也不要写投资策略结论：
+## 核心任务：多维度数据提取
 
-### 1. 指标自动识别与抽取（严格口径）
-仅允许识别并抽取以下指标（名称必须与下列一致，不要扩展或改写）：
-- 收益类（因变量）：短期收益（股息驱动）、长期收益（盈利驱动）
-- 盈利类（自变量）：净息差（NIM）、非息收入增速
-- 风险类（自变量）：还原后不良贷款率、核心一级资本充足率、拨备覆盖率
-- 业务类（自变量）：零售贷款增速、对公新兴行业贷款增速
-- 估值类（自变量）：市净率（PB）、分红率
-- 风险敞口类（自变量）：房地产敞口不良率
+你需要从年报中提取**多个维度的结构化数据**，以支持后续的统计分析（相关性分析、多元线性回归、聚类分析、因子分析）。
 
-输出每个指标的分类、变量角色（因变量/自变量）、取值、单位、期间和来源片段。
+### 1. 指标自动识别与抽取（多维度提取）
 
-### 2. 输入变量表
-- 将指标整理为“输入变量表”（变量类型、具体指标、取值、期间、单位）
-- 仅使用本年报中的数据；若表格内存在多个年份列，请一并抽取并标注period
+请从年报中识别并抽取以下**多个维度**的指标数据：
 
-### 3. 相关性与结论（不要生成）
-- "correlation_results"必须输出空数组[]
-- "strategy_conclusion"中的字段保持为空字符串或空数组
+#### 维度1：核心财务指标（用于投资策略分析）
+- **收益类（因变量）**：股息率、分红率、ROE、ROA
+- **盈利类（自变量）**：净息差（NIM）、非息收入增速、净利息收入、手续费及佣金净收入
+- **风险类（自变量）**：不良贷款率、核心一级资本充足率、拨备覆盖率、信用减值损失
+- **业务类（自变量）**：零售贷款增速、对公贷款增速、零售存款增速、对公存款增速
+- **估值类（自变量）**：市净率（PB）、市盈率（PE）、总市值
+- **风险敞口类（自变量）**：房地产敞口不良率、房地产贷款占比
 
-### 4. 模型选择约束（由后端控制）
-- model_type=correlation：只做相关性分析，不生成聚类模型
-- model_type=clustering：只做聚类模型，不生成相关性结果
-- model_type=all：相关性与聚类模型均可生成
+#### 维度2：贷款产品维度（用于聚类和相关性分析）
+从年报中查找贷款产品分类表，提取：
+- 产品名称（如：住房按揭、一般企业贷款、信用卡、消费贷、经营贷、贴现等）
+- 每个产品的：余额、占比、不良率、余额变动率、增速
+- 如果年报中有多个年份数据，一并提取
+
+#### 维度3：地区经营维度（用于因子分析和聚类）
+从年报中查找地区经营数据，提取：
+- 地区名称（如：东区、南区、西区、北区、总部、境外等）
+- 每个地区的：贷款余额、存款余额、存贷比、不良率、贷款占比、存款占比
+
+#### 维度4：行业贷款分布（用于聚类分析）
+从年报中查找行业贷款分布表，提取：
+- 行业名称（如：制造业、房地产业、批发零售业等）
+- 每个行业的：贷款余额、占比、不良率
+
+#### 维度5：业务板块数据（用于相关性分析）
+从年报中查找业务板块数据，提取：
+- 板块名称（如：零售银行、对公银行、资金业务等）
+- 每个板块的：营业收入、净利润、资产规模、减值损失
+
+#### 维度6：资产负债结构（用于因子分析）
+从年报中查找资产负债结构表，提取：
+- 资产/负债科目名称
+- 每个科目的：日均余额、利息收入/支出、平均收益率/成本率、变动率
+
+#### 维度7：时间序列数据（如果有多年数据）
+如果年报中有2-3年的历史数据，提取：
+- 年度指标：营业收入、净利润、总资产、ROE、不良率等核心指标
+- 季度数据（如果有）：各季度的收入、利润、现金流
+
+### 2. 数据提取要求
+
+1. **优先从表格中提取**：年报中的表格数据最准确，优先使用表格数据
+2. **补充文本数据**：如果表格中没有，尝试从文本描述中提取
+3. **保持原始精度**：保留原始数值，不要四舍五入
+4. **标注数据来源**：记录每个指标在年报中的位置（如"第X页表格"或"管理层讨论与分析"）
+5. **处理缺失值**：如果某个指标缺失，标注为null，不要编造数据
+
+### 3. 输入变量表构建
+
+将提取的指标整理为"输入变量表"，包括：
+- variable_type：变量类型（收益类/盈利类/风险类/业务类/估值类/风险敞口类/其他）
+- metric：具体指标名称
+- value：指标取值（数值）
+- period：期间（年份）
+- unit：单位（%、亿元、万元等）
+
+**重要**：如果某个维度有多个观测值（如多个产品、多个地区），每个观测值都要单独记录一行。
+
+### 4. 输出要求（不要生成分析结果）
+
+- "correlation_results"必须输出空数组[]（由后端计算）
+- "strategy_conclusion"中的字段保持为空字符串或空数组（由后端生成）
+- "clustering_model"保持为null（由后端生成）
+- "multiple_linear_regression"保持为null（由后端生成）
+- "factor_analysis"保持为null（由后端生成）
 
 ## ⚠️ 严格输出要求（必须遵守）
 你必须输出一个有效的JSON对象，且仅输出JSON，不要有任何其他文字说明。
@@ -1955,8 +2012,9 @@ async def generate_profit_forecast_and_valuation(
             if isinstance(data_sufficiency, dict) and not isinstance(data_sufficiency.get("is_sufficient"), bool):
                 data_sufficiency["is_sufficient"] = False
 
-        # 使用代码计算相关性（优先于LLM填充）
+        # 自动执行四个分析：相关性分析、多元线性回归、聚类、因子分析
         if isinstance(result_dict, dict):
+            # 1. 相关性分析
             if normalized_model in {"correlation", "all"}:
                 correlation_results = result_dict.get("correlation_results") or []
                 data_sufficiency = result_dict.get("data_sufficiency")
@@ -2049,31 +2107,74 @@ async def generate_profit_forecast_and_valuation(
                     "reason": "相关性模型未启用",
                     "sample_description": None
                 }
+            
+            # 2. 多元线性回归分析
+            if normalized_model in {"correlation", "all"}:
+                if not result_dict.get("multiple_linear_regression"):
+                    logger.info("开始执行多元线性回归分析")
+                    regression_result, regression_sufficiency = build_multiple_linear_regression(
+                        result_dict.get("indicator_extraction") or [],
+                        result_dict.get("variable_table") or [],
+                        year
+                    )
+                    result_dict["multiple_linear_regression"] = regression_result
+                    if not result_dict.get("regression_data_sufficiency"):
+                        result_dict["regression_data_sufficiency"] = regression_sufficiency
+            
+            # 3. 因子分析
+            if normalized_model in {"correlation", "all"}:
+                if not result_dict.get("factor_analysis"):
+                    logger.info("开始执行因子分析")
+                    factor_result, factor_sufficiency = build_factor_analysis(
+                        result_dict.get("indicator_extraction") or [],
+                        result_dict.get("variable_table") or [],
+                        year
+                    )
+                    result_dict["factor_analysis"] = factor_result
+                    if not result_dict.get("factor_data_sufficiency"):
+                        result_dict["factor_data_sufficiency"] = factor_sufficiency
 
-            # 生成聚类分析模型（从表格+年报文本自动填充）
+            # 4. 生成聚类分析模型（从表格+年报文本自动填充）
             if normalized_model in {"clustering", "all"} and not result_dict.get("clustering_model"):
                 import json
                 clustering_prompt = f"""
-你是专业投研分析师，请基于以下数据生成“聚类分析模型（客群-标的适配分组）”。
+你是专业投研分析师，请基于以下数据生成"聚类分析模型（客群-标的适配分组）"。
 仅使用提供的数据，不要编造；缺失处用null或空字符串。
 
 ### 数据来源（表格优先，其次年报文本）
 {str(forecast_data)}
 
-### 必须包含的变量设计（维度与指标名称必须一致）
-- 估值维度：市净率（PB）
-- 盈利维度：加权平均ROE
-- 风险维度：还原后不良贷款率
-- 增长维度：对公贷款增速
-- 防御维度：股息率
+### 核心任务：多维度聚类分析
+
+你需要从年报中提取**多个维度的数据**进行聚类分析，识别不同的业务组合模式：
+
+#### 维度1：投资策略聚类（公司整体定位）
+基于以下指标对公司进行投资组合定位：
+- **估值维度**：市净率（PB）、市盈率（PE）
+- **盈利维度**：加权平均ROE、ROA、净息差（NIM）
+- **风险维度**：还原后不良贷款率、核心一级资本充足率、拨备覆盖率
+- **增长维度**：总资产增速、贷款增速、营业收入增速
+- **防御维度**：股息率、分红率
+
+**聚类结果（固定K=3）**：
+- 组别1：高股息低估值防御组（PB<0.6、股息率>5%、ROE10%-11%、不良率1.7%-1.8%）
+- 组别2：稳健增长组（PB0.6-0.8、ROE12%-15%、不良率1.0%-1.5%、增速5%-10%）
+- 组别3：高增长高弹性组（PB>0.8、ROE>15%、不良率<1.0%、增速>10%）
+
+#### 维度2：贷款产品聚类（产品组合分析）
+如果年报中有贷款产品分类数据，基于以下指标对产品进行聚类：
+- 余额、占比、不良率、余额变动率、增速
+- 识别：低风险-低增长、中风险-高增长、高风险-大幅收缩等模式
+
+#### 维度3：地区经营聚类（区域组合分析）
+如果年报中有地区经营数据，基于以下指标对地区进行聚类：
+- 贷款余额、存款余额、存贷比、不良率、贷款占比、存款占比
+- 识别：低风险边缘区、高风险集中区、中等风险主力区等模式
 
 ### 参考行业对标对象（如有披露）
 招行、兴业、股份行均值（2024年）
 
-### 聚类结果（固定K=3，按区间规则归类）
-组别1：高股息低估值防御组
-组别2：稳健增长组
-组别3：高增长高弹性组
+### 输出要求
 
 ### 输出要求
 必须输出JSON且只输出JSON，结构如下：
@@ -2124,6 +2225,161 @@ async def generate_profit_forecast_and_valuation(
                             result_dict["clustering_model"] = clustering_model
                 except Exception as clustering_error:
                     logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 聚类模型生成失败: {str(clustering_error)}")
+            
+            # 5. 生成综合洞察文本（基于四个分析的结果）
+            if normalized_model == "all" and result_dict.get("correlation_results") or result_dict.get("multiple_linear_regression") or result_dict.get("factor_analysis") or result_dict.get("clustering_model"):
+                import json
+                comprehensive_insight_prompt = f"""
+你是专业投资分析师，请基于以下四个分析结果，为{company_name}生成深度、可操作的投资策略洞察报告。
+
+## 分析结果数据
+
+### 1. 相关性分析结果
+{json.dumps(result_dict.get("correlation_results") or [], ensure_ascii=False, indent=2)}
+
+### 2. 多元线性回归分析结果
+{json.dumps(result_dict.get("multiple_linear_regression") or {}, ensure_ascii=False, indent=2)}
+
+### 3. 因子分析结果
+{json.dumps(result_dict.get("factor_analysis") or {}, ensure_ascii=False, indent=2)}
+
+### 4. 聚类分析结果
+{json.dumps(result_dict.get("clustering_model") or {}, ensure_ascii=False, indent=2)}
+
+### 5. 策略结论（已有）
+{json.dumps(result_dict.get("strategy_conclusion") or {}, ensure_ascii=False, indent=2)}
+
+### 6. 输入变量表（参考）
+{json.dumps(result_dict.get("variable_table") or [], ensure_ascii=False, indent=2)}
+
+## 输出要求
+
+请生成一份**专业、深入、可操作**的投资策略洞察报告，必须包含以下内容：
+
+### 一、相关性分析洞察
+
+**要求**：
+1. 识别**强相关关系**（相关系数绝对值>0.7）和**中等相关关系**（0.5-0.7）
+2. 解释每个相关关系的**业务含义**：
+   - 为什么会有这种关联？
+   - 这种关联说明了什么业务逻辑？
+   - 对投资决策有什么启示？
+3. 找出**反直觉的发现**（如：规模大但风险低，或增长快但质量好）
+4. 识别**风险信号**（如：高相关性可能意味着集中度风险）
+
+**示例格式**：
+- "贷款余额与不良率相关系数高达0.869，说明规模大的区域不良率也偏高，可能存在区域集中度风险"
+- "余额变动率与不良率变动相关系数仅0.281，说明压缩规模的产品不良率未必改善，需要关注资产质量而非单纯规模控制"
+
+### 二、多元线性回归洞察
+
+**要求**：
+1. 解释**回归系数的经济含义**：
+   - 每个自变量对因变量的影响方向和强度
+   - 哪些因素是主要驱动因素？
+   - 哪些因素影响较小？
+2. 评估**模型解释力**（R²）：
+   - R²>0.6：模型解释力较好
+   - R²在0.4-0.6：模型解释力中等
+   - R²<0.4：模型解释力较弱，需要补充更多变量
+3. 识别**关键驱动因素**：哪些自变量的系数最大，对因变量影响最显著？
+4. 给出**预测性建议**：基于回归模型，如果要改善因变量，应该重点调整哪些自变量？
+
+**示例格式**：
+- "回归模型显示，占比系数最大(9.12)，说明贷款占比越高不良率越高，需要关注贷款结构优化"
+- "R²=0.626，模型解释力中等，说明不良率还受其他因素影响（如宏观经济、行业周期等）"
+
+### 三、因子分析洞察
+
+**要求**：
+1. 解释**每个因子的业务含义**：
+   - 因子1、因子2、因子3分别代表什么业务维度？
+   - 哪些指标在这个因子上载荷高？说明什么？
+2. 评估**因子解释力**：
+   - 各因子解释了多少方差？
+   - 累计解释方差比例是多少？
+3. 识别**主要业务维度**：哪些因子最重要？反映了公司的什么特征？
+4. 给出**业务优化建议**：基于因子分析，公司应该在哪些维度上重点发力？
+
+**示例格式**：
+- "因子1（规模因子）解释了45%的方差，存款余额和存款占比载荷极高(>0.99)，反映公司存款吸纳能力强"
+- "因子2（风险因子）解释了32%的方差，贷款余额和不良率载荷高，反映贷款风险集中度，需要关注风险分散"
+
+### 四、聚类分析洞察
+
+**要求**：
+1. 描述**每个聚类的特征**：
+   - 每个聚类包含哪些产品/地区/业务？
+   - 每个聚类的核心特征是什么？（如：低风险-低增长、中风险-高增长、高风险-大幅收缩）
+2. 识别**业务策略模式**：
+   - 公司正在采取什么策略？（如：压缩高风险业务、扩张低风险业务）
+   - 哪些业务是重点发展对象？哪些是风险出清对象？
+3. 评估**投资组合定位**：
+   - 公司当前属于哪个聚类？
+   - 如果要升级到更好的聚类，需要满足什么条件？
+4. 给出**投资建议**：
+   - 基于聚类结果，适合什么类型的投资者？
+   - 短期、中期、长期的投资逻辑分别是什么？
+
+**示例格式**：
+- "聚类结果显示，公司正在主动'压缩高风险零售贷款，扩张对公企业贷款'，第三类产品（信用卡、消费贷、经营贷）是风险出清的重点"
+- "公司当前定位为'中风险-高增长'组，如果要进入'低风险-稳健增长'组，需要将不良率控制在0.5%以下，同时保持ROE在12%以上"
+
+### 五、综合投资策略建议
+
+**要求**：
+1. **整合四个分析的发现**，形成统一的投资逻辑
+2. **识别核心投资亮点**：基于分析，公司的核心优势是什么？
+3. **识别关键风险点**：需要重点关注哪些风险？
+4. **给出具体投资建议**：
+   - **短期（6-12个月）**：基于当前数据，短期投资逻辑是什么？
+   - **中期（1-2年）**：基于业务趋势，中期投资逻辑是什么？
+   - **长期（3-5年）**：基于战略定位，长期投资逻辑是什么？
+5. **目标投资者画像**：适合什么风险偏好的投资者？
+
+## 输出格式
+
+使用Markdown格式，包含以下结构：
+
+```markdown
+# {company_name}投资策略分析报告
+
+## 一、相关性分析洞察
+[详细内容]
+
+## 二、多元线性回归洞察
+[详细内容]
+
+## 三、因子分析洞察
+[详细内容]
+
+## 四、聚类分析洞察
+[详细内容]
+
+## 五、综合投资策略建议
+[详细内容]
+```
+
+**重要要求**：
+- 必须基于实际分析结果，不要编造数据
+- 每个洞察都要有数据支撑（引用具体的相关系数、回归系数、因子载荷等）
+- 语言要专业但易懂，避免过于技术化的表述
+- 给出可操作的建议，不要只是描述现象
+- 如果某个分析结果不充分，明确说明局限性
+"""
+                try:
+                    comprehensive_response = await llm.achat([
+                        ChatMessage(role="system", content="你是一个专业的投资分析师，擅长整合多种分析方法生成综合洞察。"),
+                        ChatMessage(role="user", content=comprehensive_insight_prompt)
+                    ])
+                    if hasattr(comprehensive_response, 'message'):
+                        comprehensive_content = comprehensive_response.message.content if hasattr(comprehensive_response.message, 'content') else str(comprehensive_response.message)
+                    else:
+                        comprehensive_content = str(comprehensive_response)
+                    result_dict["comprehensive_insight"] = comprehensive_content
+                    logger.info("✅ 综合洞察生成成功")
+                except Exception as insight_error:
+                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 综合洞察生成失败: {str(insight_error)}")
         
         return result_dict
         

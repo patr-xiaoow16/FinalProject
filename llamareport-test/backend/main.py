@@ -45,10 +45,21 @@ async def lifespan(app: FastAPI):
         logger.info(f"✅ 目录已创建: {directory}")
     
     # 检查环境变量
+    llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+    # 支持 anthropic 作为 claude 的别名
+    if llm_provider == "anthropic":
+        llm_provider = "claude"
+    
     required_env_vars = {
-        "OPENAI_API_KEY": "用于 Embedding 模型",
-        "DEEPSEEK_API_KEY": "用于对话模型"
+        "OPENAI_API_KEY": "用于 Embedding 模型"
     }
+    
+    # 根据 LLM_PROVIDER 添加对应的 API Key 要求
+    if llm_provider == "claude":
+        required_env_vars["ANTHROPIC_API_KEY"] = "用于对话模型 (Claude)"
+    else:
+        required_env_vars["DEEPSEEK_API_KEY"] = "用于对话模型 (DeepSeek)"
+    
     missing_vars = []
     for var, purpose in required_env_vars.items():
         if not os.getenv(var):
@@ -59,7 +70,10 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️ 某些功能可能无法正常工作")
     else:
         logger.info("✅ 环境变量检查通过")
-        logger.info(f"✅ 对话模型: DeepSeek ({os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')})")
+        if llm_provider == "claude":
+            logger.info(f"✅ 对话模型: Anthropic Claude ({os.getenv('ANTHROPIC_MODEL', 'claude-3-5-sonnet-20241022')})")
+        else:
+            logger.info(f"✅ 对话模型: DeepSeek ({os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')})")
         logger.info(f"✅ 嵌入模型: OpenAI (text-embedding-3-small)")
     
     logger.info("✅ LlamaReport Backend 启动完成")
@@ -254,9 +268,9 @@ async def get_system_info():
                 "storage_size": f"{storage_size / (1024*1024):.2f} MB"
             },
             "configuration": {
-                "llm_provider": "DeepSeek",
-                "llm_model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-                "llm_configured": bool(os.getenv("DEEPSEEK_API_KEY")),
+                "llm_provider": os.getenv("LLM_PROVIDER", "deepseek"),
+                "llm_model": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022") if os.getenv("LLM_PROVIDER", "deepseek").lower() in ["claude", "anthropic"] else os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                "llm_configured": bool(os.getenv("ANTHROPIC_API_KEY")) if os.getenv("LLM_PROVIDER", "deepseek").lower() in ["claude", "anthropic"] else bool(os.getenv("DEEPSEEK_API_KEY")),
                 "embedding_provider": "OpenAI",
                 "embedding_model": "text-embedding-3-small",
                 "embedding_configured": bool(os.getenv("OPENAI_API_KEY"))

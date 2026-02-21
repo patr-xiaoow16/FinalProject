@@ -70,7 +70,7 @@
 
 ---
 
-## 四、投资策略（相关性分析）
+## 四、投资策略（聚类分析）
 
 ### (一) 指标自动识别与抽取
 
@@ -90,18 +90,43 @@
 | {{ row.variable_type }} | {{ row.metric }} | {{ row.value or "-" }} | {{ row.period or "-" }} | {{ row.unit or "-" }} |
 {% endfor %}
 
-### (三) 相关性分析结果
+### (三) 聚类分析模型（客群-标的适配分组）
 
-{% if profit_forecast_and_valuation.data_sufficiency and profit_forecast_and_valuation.data_sufficiency.is_sufficient == false %}
-**数据说明**: {{ profit_forecast_and_valuation.data_sufficiency.reason or "样本不足" }}{% if profit_forecast_and_valuation.data_sufficiency.sample_description %}（{{ profit_forecast_and_valuation.data_sufficiency.sample_description }}）{% endif %}
-{% endif %}
+{% if profit_forecast_and_valuation.clustering_model %}
+{% set clustering = profit_forecast_and_valuation.clustering_model %}
+**方法**: {{ clustering.method }}（K={{ clustering.k }}）
 
-{% if profit_forecast_and_valuation.correlation_results %}
-{% for item in profit_forecast_and_valuation.correlation_results %}
-- {{ item.target_metric }} - {{ item.driver_metric }}：{% if item.correlation is not none %}r={{ item.correlation }}{% else %}r=NA{% endif %}{% if item.significance %}；{{ item.significance }}{% endif %}{% if item.interpretation %}；{{ item.interpretation }}{% endif %}
+#### 聚类变量设计表
+
+| 维度 | 标的聚类变量 | 平安银行数据取值 | 行业对标数据 |
+| --- | --- | --- | --- |
+{% for var in clustering.variable_table %}
+| {{ var.dimension }} | {{ var.metric }} | {{ var.company_value or "-" }} | {{ var.industry_benchmark or "-" }} |
 {% endfor %}
+
+#### 聚类结果
+
+{% for group in clustering.group_results %}
+**{{ group.group_name }}**
+- 标的特征：{{ group.feature_profile }}
+- 平安银行归属：{{ group.company_assignment }}
+- 适配投资需求特征：{{ group.investor_profile }}
+- 时间-风险分层：{{ group.time_risk_bucket }}
+
+{% endfor %}
+
+#### 核心结论与应用
+
+{% set conclusion = clustering.conclusion %}
+- **当前分组结论**：{{ conclusion.current_position }}
+{% if conclusion.upgrade_conditions %}
+- **升级到稳健增长组条件**：{{ conclusion.upgrade_conditions }}
+{% endif %}
+{% if conclusion.high_growth_conditions %}
+- **进入高增长高弹性组条件**：{{ conclusion.high_growth_conditions }}
+{% endif %}
 {% else %}
-暂无可计算的相关性结果。
+暂无可用的聚类分析结果。
 {% endif %}
 
 ### (四) 核心结论与应用
