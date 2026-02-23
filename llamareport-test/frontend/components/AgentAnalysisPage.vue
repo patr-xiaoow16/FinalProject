@@ -1453,44 +1453,7 @@ export default {
                   })
                 }
                 
-                // 2. 多元线性回归可视化
-                if (toolOutput.multiple_linear_regression && toolOutput.multiple_linear_regression.coefficients) {
-                  const regression = toolOutput.multiple_linear_regression
-                  const coefs = regression.coefficients || {}
-                  const variables = Object.keys(coefs).filter(k => k !== 'intercept')
-                  const values = variables.map(v => coefs[v])
-                  
-                  if (variables.length > 0) {
-                    this.visualizations.push({
-                      id: `investment-strategy-regression-${Date.now()}`,
-                      question: '多元线性回归系数',
-                      source: 'investment_strategy',
-                      data: {
-                        has_visualization: true,
-                        visualization_type: 'plotly',
-                        chart_config: {
-                          chart_type: 'bar',
-                          traces: [{
-                            type: 'bar',
-                            name: '回归系数',
-                            x: variables,
-                            y: values,
-                            marker: {
-                              color: values.map(v => v >= 0 ? '#667eea' : '#ef4444')
-                            }
-                          }],
-                          layout: {
-                            title: `多元线性回归分析（R²=${regression.r_squared?.toFixed(3) || 'N/A'}）`,
-                            xaxis_title: '自变量',
-                            yaxis_title: '回归系数'
-                          }
-                        }
-                      }
-                    })
-                  }
-                }
-                
-                // 3. 因子分析可视化
+                // 2. 因子分析可视化
                 if (toolOutput.factor_analysis && toolOutput.factor_analysis.factors && toolOutput.factor_analysis.factors.length > 0) {
                   const factorAnalysis = toolOutput.factor_analysis
                   const factors = factorAnalysis.factors || []

@@ -13,7 +13,7 @@
         <p class="upload-hint">支持格式：PDF、Excel (.xlsx, .xls)</p>
       </div>
       <div v-if="files.length > 0" class="file-list">
-        <div v-for="file in files" :key="file.filename" :class="['file-item', { active: isFileSelected(file.filename), processing: isFileProcessing(file.filename), completed: isFileCompleted(file.filename) }]" @click="toggleFileSelection(file)">
+        <div v-for="file in sortedFiles" :key="file.filename" :class="['file-item', { active: isFileSelected(file.filename), processing: isFileProcessing(file.filename), completed: isFileCompleted(file.filename) }]" @click="toggleFileSelection(file)">
           <div class="file-checkbox">
             <input type="checkbox" :checked="isFileSelected(file.filename)" @click.stop="toggleFileSelection(file)" />
           </div>
@@ -79,6 +79,15 @@ export default {
       previewFile: null,
       showPreview: false
     };
+  },
+  computed: {
+    // PDF 排在最上面，其余按原顺序
+    sortedFiles() {
+      if (!this.files || !this.files.length) return [];
+      const pdf = this.files.filter(f => this.isPdfFile(f.file_type));
+      const other = this.files.filter(f => !this.isPdfFile(f.file_type));
+      return [...pdf, ...other];
+    }
   },
   mounted() {
     // 监听文件处理完成事件

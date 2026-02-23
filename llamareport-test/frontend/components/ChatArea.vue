@@ -46,7 +46,7 @@
                 class="quick-btn profit-forecast" 
                 @click.stop="toggleProfitForecastSubButtons"
                 :disabled="loading"
-                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、多元回归、聚类分析、因子分析、综合投资策略'"
+                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、综合投资策略'"
               >
                 <span class="btn-icon">📈</span>
                 <span class="btn-text">投资策略</span>
@@ -59,12 +59,6 @@
                   :disabled="loading"
                   title="仅生成相关性分析"
                 >相关性分析</button>
-                <button 
-                  class="quick-btn sub-btn" 
-                  @click="handleQuickAnalysis('profit_forecast', 'regression_only')"
-                  :disabled="loading"
-                  title="仅生成多元线性回归分析"
-                >多元回归</button>
                 <button 
                   class="quick-btn sub-btn" 
                   @click="handleQuickAnalysis('profit_forecast', 'clustering')"
@@ -81,7 +75,7 @@
                   class="quick-btn sub-btn" 
                   @click="handleQuickAnalysis('profit_forecast', 'all')"
                   :disabled="loading"
-                  title="生成综合投资策略（四项分析+综合洞察）"
+                  title="生成综合投资策略（相关性、聚类、因子分析+综合洞察）"
                 >综合投资策略</button>
               </div>
             </div>
@@ -228,7 +222,6 @@ export default {
       };
       const profitForecastSubMap = {
         'correlation_only': '相关性分析',
-        'regression_only': '多元回归',
         'clustering': '聚类分析',
         'factor_only': '因子分析',
         'all': '综合投资策略'

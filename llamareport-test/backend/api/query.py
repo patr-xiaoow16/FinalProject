@@ -1661,7 +1661,31 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                                     if change_rate or change_direction:
                                         break
                             
-                        # 趋势一律用计算值，不使用检索到的同比
+                            # 核心指标趋势：先使用检索到的同比；若无则用当年/上年数值公式计算
+                            if change_rate is None and change_direction is None:
+                                prev_num_match = re.search(r'[\s|]*([\d,\.]+)\s*[%万千百十亿]?', after_match)
+                                if prev_num_match:
+                                    prev_value_str = prev_num_match.group(1).strip().replace(',', '').replace('，', '')
+                                    cur_num = _parse_metric_value(value)
+                                    prev_num = _parse_metric_value(prev_value_str) if prev_value_str else None
+                                    if cur_num is not None and prev_num is not None and abs(prev_num) > 1e-9:
+                                        amount_keys = ["revenue", "net_profit", "total_assets"]
+                                        if key in amount_keys:
+                                            pct = (cur_num - prev_num) / prev_num * 100
+                                            if abs(cur_num - prev_num) < 1e-9:
+                                                change_rate, change_direction = None, '持平'
+                                            else:
+                                                change_rate, change_direction = f"{pct:+.1f}%", '增长' if cur_num >= prev_num else '下降'
+                                        else:
+                                            diff = cur_num - prev_num
+                                            if abs(diff) < 1e-9:
+                                                change_rate, change_direction = None, '持平'
+                                            else:
+                                                change_rate = f"{diff:+.2f}个百分点" if abs(prev_num) > 1 else f"{(cur_num - prev_num) / prev_num * 100:+.1f}%"
+                                                change_direction = '增长' if cur_num >= prev_num else '下降'
+                                        if change_rate:
+                                            logger.info(f"  📐 趋势公式计算: {key} change_rate={change_rate}")
+                            
                         regex_extracted[key] = {
                             "name": {
                                 "roe": "加权平均净资产收益率（ROE）",
@@ -1675,11 +1699,11 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                                 "capital_adequacy_ratio": "资本充足率"
                             }.get(key, key),
                             "value": value,
-                            "change_rate": None,
-                            "change_direction": None,
+                            "change_rate": change_rate,
+                            "change_direction": change_direction,
                             "is_missing": False
                         }
-                        logger.info(f"  ✅ 正则提取到 {key}: {value}" + (f", 同比: {change_rate}" if change_rate else ""))
+                        logger.info(f"  ✅ 正则提取到 {key}: {value}" + (f", 同比(检索): {change_rate}" if change_rate else ""))
                         break
                 
                 # 更新snapshot_dict

@@ -18,7 +18,7 @@ from models.report_models import (
     FinancialStatementTables
 )
 from agents.visualization_agent import generate_visualization_for_query
-# 相关性、多元线性回归、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_multiple_linear_regression / _llm_factor_analysis
+# 相关性、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_factor_analysis（多元回归已移除）
 
 logger = logging.getLogger(__name__)
 
@@ -1670,25 +1670,41 @@ async def _llm_correlation_analysis(
     import json
     import re
     prompt = f"""
-你是一位专业投资分析师，请基于以下指标抽取与输入变量表，进行**相关性分析**。
+你是一位专业投资分析师。请严格按以下步骤执行并输出。
+
+## 目标
+从输入变量表中提取核心财务指标的时间序列，计算 Pearson 相关系数矩阵，并输出矩阵（列表形式）。
+
+## 核心财务指标（8 项）
+净息差、ROE、ROA、不良率、拨备覆盖率、成本收入比、信贷成本、资本充足率。
+
+## 输入
 
 ### 指标抽取
 {json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
 
-### 输入变量表（含 period 与 value，同一 metric 多行表示多期数据）
+### 输入变量表（同一 metric 多行 = 多期数据，period 为年份）
 {json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
 
-### 要求
-1. 区分因变量（收益类）与自变量（盈利类、风险类、业务类、估值类、风险敞口类等）。
-2. 对每一对「因变量-自变量」在共同 period 上计算 Pearson 相关系数（或基于数值合理估算），并给出显著性解读（如强正相关、强负相关、中强相关、弱相关等）。
-3. 若因变量或自变量不足、或共同时间点少于 3 个，则 correlation_results 输出空数组 []，并在 data_sufficiency 中说明原因。
+## 步骤 1：从 variable_table 构建时间序列
+- 按 metric 分组，收集每项指标的 (period, value) 列表。
+- 数据标准化：统一单位与命名（如 ROE、净资产收益率 视为同一指标）。
 
-请**只输出一个 JSON 对象**，不要其他文字。格式如下：
+## 步骤 2：计算 Pearson 相关系数矩阵
+- 对上述 8 项指标**两两**判断：若两者在 variable_table 中存在**至少 3 个共同 period**，则计算该两列数值的 Pearson 相关系数，并输出一条记录（target_metric, driver_metric, correlation, significance, interpretation, data_points）。
+- **必须尽可能输出**：只要有一对指标具备至少 3 个共同时间点，correlation_results 就不得为空。多对满足条件则全部输出。
+- 显著性解读：|r|>0.7 强相关，0.5~0.7 中强相关，0.3~0.5 弱相关，<0.3 无显著相关；并区分正/负。
+
+## 步骤 3：数据充分性
+- 若至少有一对指标有 3 个及以上共同时间点并已输出，则 is_sufficient 为 true，sample_description 写明时间范围（如"2022-2024年3期"）。
+- 若 variable_table 中没有任何一对指标具备 3 个共同 period，则 correlation_results 可为 []，is_sufficient 为 false，reason 说明"共同时间点不足三年"。
+
+请**只输出一个 JSON 对象**，无其他文字。格式如下：
 {{
   "correlation_results": [
     {{
-      "target_metric": "因变量指标名",
-      "driver_metric": "自变量指标名",
+      "target_metric": "指标A名称",
+      "driver_metric": "指标B名称",
       "correlation": 0.85,
       "significance": "强正相关",
       "interpretation": "简要业务解读",
@@ -1698,7 +1714,7 @@ async def _llm_correlation_analysis(
   "data_sufficiency": {{
     "is_sufficient": true,
     "reason": null,
-    "sample_description": "如：2020-2024年5期"
+    "sample_description": "如：2022-2024年3期"
   }}
 }}
 """
@@ -1721,70 +1737,6 @@ async def _llm_correlation_analysis(
         return [], {"is_sufficient": False, "reason": str(e), "sample_description": None}
 
 
-async def _llm_multiple_linear_regression(
-    indicator_extraction: List[Dict[str, Any]],
-    variable_table: List[Dict[str, Any]],
-    year: str,
-    llm: Any
-) -> tuple:
-    """使用 LLM 生成多元线性回归分析结果，返回 (regression_dict, data_sufficiency)。"""
-    import json
-    import re
-    prompt = f"""
-你是一位专业投资分析师，请基于以下指标与变量表，进行**多元线性回归分析**（一个因变量，多个自变量）。
-
-### 指标抽取
-{json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
-
-### 输入变量表
-{json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
-
-### 要求
-1. 选定一个因变量（收益类）与多个自变量（至少 2 个），在共同 period 上建立多元线性回归。
-2. 输出截距 intercept 与各自变量的回归系数、R²、简要解释。若样本不足或无法计算，则 coefficients 为空、r_squared 为 null，interpretation 说明原因。
-
-请**只输出一个 JSON 对象**，格式如下：
-{{
-  "multiple_linear_regression": {{
-    "target_metric": "因变量名",
-    "independent_variables": ["自变量1", "自变量2"],
-    "coefficients": {{ "intercept": 0.5, "自变量1": 0.2, "自变量2": -0.1 }},
-    "r_squared": 0.65,
-    "interpretation": "模型简要解读",
-    "data_points": 5
-  }},
-  "regression_data_sufficiency": {{
-    "is_sufficient": true,
-    "reason": null,
-    "sample_description": "如：5 个样本"
-  }}
-}}
-"""
-    try:
-        response = await llm.achat([
-            ChatMessage(role="system", content="你是专业投资分析师，擅长多元线性回归。必须只输出一个合法 JSON 对象。"),
-            ChatMessage(role="user", content=prompt)
-        ])
-        content = response.message.content if hasattr(response, "message") and hasattr(response.message, "content") else str(response)
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            return (
-                {"target_metric": None, "independent_variables": [], "coefficients": {}, "r_squared": None, "interpretation": "LLM 未返回有效 JSON"},
-                {"is_sufficient": False, "reason": "LLM 未返回有效 JSON", "sample_description": None}
-            )
-        parsed = json.loads(match.group(0))
-        reg = parsed.get("multiple_linear_regression") or {}
-        suff = parsed.get("regression_data_sufficiency") or {}
-        suff.setdefault("is_sufficient", bool(reg.get("coefficients")))
-        return reg, suff
-    except Exception as e:
-        logger.warning(f"LLM 多元线性回归失败: {e}")
-        return (
-            {"target_metric": None, "independent_variables": [], "coefficients": {}, "r_squared": None, "interpretation": str(e)},
-            {"is_sufficient": False, "reason": str(e), "sample_description": None}
-        )
-
-
 async def _llm_factor_analysis(
     indicator_extraction: List[Dict[str, Any]],
     variable_table: List[Dict[str, Any]],
@@ -1795,53 +1747,123 @@ async def _llm_factor_analysis(
     import json
     import re
     prompt = f"""
-你是一位专业投资分析师，请基于以下指标与变量表，进行**因子分析**（如主成分/因子提取）。
+你是一位专业投资分析师，请基于以下指标与变量表，**严格按照下列四步**完成因子分析，并在最后输出系统要求的 JSON。
 
-### 指标抽取
+### 指标抽取（参考）
 {json.dumps(indicator_extraction or [], ensure_ascii=False, indent=2)}
 
-### 输入变量表
+### 输入变量表（参考）
 {json.dumps(variable_table or [], ensure_ascii=False, indent=2)}
 
-### 要求
-1. 对自变量指标进行因子分析，提取 2～3 个因子，给出因子名称、各指标在因子上的载荷、各因子解释的方差比例、简要解读。
-2. 若指标数或样本不足，则 factors 为空数组、factor_loadings 为空对象，interpretation 说明原因。
+============================
+第一步：构建指标数据矩阵
+============================
+从年报中提取最近 3–5 年的核心财务指标（至少3年）。
+指标选择遵循以下原则：
+（1）盈利能力指标
+ROE、ROA、净利润率/净息差（银行）、毛利率（制造业）
+（2）风险指标
+不良率（银行）/资产减值率、资产负债率、资本充足率（金融机构）、流动比率
+（3）效率指标
+成本收入比、周转率类指标、营业费用率、运营效率指标
 
-请**只输出一个 JSON 对象**，格式如下：
+构建如下格式数据表：年份 指标1 指标2...
+要求：所有指标必须为数值型；处理缺失值；对指标进行标准化（Z-score）。
+
+============================
+第二步：执行因子分析
+============================
+请执行标准因子分析流程：
+计算相关系数矩阵 → 提取特征值（Eigenvalues）→ 根据特征值>1原则确定因子数量 → 计算因子载荷矩阵 → 计算共同度 → 计算方差贡献率与累计贡献率 → 进行因子旋转（如Varimax）。
+
+输出：
+（1）因子载荷矩阵
+格式：| 指标 | 因子1 | 因子2 | 因子3 | 共同度 |
+并根据载荷大小识别：每个因子的“核心解释变量”、因子经济含义命名（例如：因子1=盈利因子，因子2=风险因子，因子3=效率因子）。
+
+（2）方差贡献分析
+| 因子 | 特征值 | 方差贡献率 | 累计贡献率 |
+要求：累计贡献率≥80%；对因子重要性排序。
+
+============================
+第三步：计算年度因子得分
+============================
+计算各年因子得分（标准化），构建综合得分（加权平均）：
+综合得分 = Σ(因子得分 × 方差贡献率权重)
+输出：| 年份 | 因子1得分 | 因子2得分 | 因子3得分 | 综合得分 |
+
+============================
+第四步：生成因子洞察报告
+============================
+请基于因子分析结果输出结构化分析报告：
+一、因子结构识别：共提取多少个因子；每个因子解释的经济含义；主要载荷变量。
+二、企业经营驱动拆解：盈利/风险/效率驱动因素；哪个因子主导公司经营变化、哪个因子出现恶化。
+三、年度变化趋势分析：因子得分趋势、综合得分变化、驱动结构是否发生变化。
+四、风险提示：高载荷风险指标、因子恶化方向。
+五、投资判断：偏盈利驱动/偏风险驱动/偏效率驱动；结构性改善还是周期性波动；投资建议倾向（进攻/防守/观望）。
+
+============================
+输出格式要求
+============================
+必须包含：数据表、因子载荷矩阵、方差贡献表、因子得分表、结构化洞察。
+不得输出无法计算的数据。若样本年份不足3年，需提示因子稳定性不足。
+
+---
+请在上述分析之后，**单独输出一个 JSON 对象**（便于系统解析），结构如下，不得缺少：
 {{
   "factor_analysis": {{
-    "factors": ["因子1", "因子2"],
+    "factors": ["因子1名称", "因子2名称"],
     "factor_loadings": {{
-      "因子1": {{ "指标A": 0.9, "指标B": 0.1 }},
-      "因子2": {{ "指标A": 0.2, "指标B": 0.85 }}
+      "因子1名称": {{ "指标A": 载荷值, "指标B": 载荷值 }},
+      "因子2名称": {{ "指标A": 载荷值, "指标B": 载荷值 }}
     }},
-    "variance_explained": {{ "因子1": 0.45, "因子2": 0.35 }},
-    "interpretation": "简要解读",
-    "data_points": 5
+    "variance_explained": {{ "因子1名称": 比例, "因子2名称": 比例 }},
+    "interpretation": "第四步洞察报告的精炼总结（含因子结构、驱动拆解、趋势、风险与投资判断要点）",
+    "data_points": 样本年数
   }},
   "factor_data_sufficiency": {{
-    "is_sufficient": true,
-    "reason": null,
-    "sample_description": "如：5 个样本"
+    "is_sufficient": true或false,
+    "reason": null或不足原因,
+    "sample_description": "如：5年样本"
   }}
 }}
+若指标或样本不足无法完成因子分析，则 factors 为空数组、factor_loadings 为空对象，interpretation 中说明原因。
 """
     try:
         response = await llm.achat([
-            ChatMessage(role="system", content="你是专业投资分析师，擅长因子分析。必须只输出一个合法 JSON 对象。"),
+            ChatMessage(role="system", content="你是专业投资分析师，擅长因子分析。请严格按四步完成：指标矩阵→因子分析→年度得分→洞察报告；最后必须输出一个合法 JSON 对象。"),
             ChatMessage(role="user", content=prompt)
         ])
         content = response.message.content if hasattr(response, "message") and hasattr(response.message, "content") else str(response)
-        match = re.search(r"\{[\s\S]*\}", content)
+        # 优先匹配包含 factor_analysis 的 JSON（长回复中可能在文末）
+        all_matches = list(re.finditer(r"\{[\s\S]*\}", content))
+        match = None
+        for m in reversed(all_matches):
+            raw = m.group(0)
+            if "factor_analysis" in raw and "factor_data_sufficiency" in raw:
+                raw_clean = re.sub(r"[\x00-\x1f]", " ", raw)
+                try:
+                    parsed = json.loads(raw_clean)
+                    if isinstance(parsed.get("factor_analysis"), dict):
+                        match = m
+                        break
+                except json.JSONDecodeError:
+                    continue
+        if not match:
+            match = all_matches[-1] if all_matches else None
         if not match:
             return (
                 {"factors": [], "factor_loadings": {}, "variance_explained": {}, "interpretation": "LLM 未返回有效 JSON"},
                 {"is_sufficient": False, "reason": "LLM 未返回有效 JSON", "sample_description": None}
             )
-        parsed = json.loads(match.group(0))
+        json_str = re.sub(r"[\x00-\x1f]", " ", match.group(0))
+        parsed = json.loads(json_str)
         fa = parsed.get("factor_analysis") or {}
         suff = parsed.get("factor_data_sufficiency") or {}
         suff.setdefault("is_sufficient", bool(fa.get("factors")))
+        # 保留 LLM 完整回复（含数据表、因子载荷表、方差贡献表、因子得分表、第四步完整洞察），供界面展示
+        if isinstance(content, str) and content.strip():
+            fa["full_report"] = content.strip()
         return fa, suff
     except Exception as e:
         logger.warning(f"LLM 因子分析失败: {e}")
@@ -1879,7 +1901,15 @@ async def generate_profit_forecast_and_valuation(
         投资策略（包含四个分析）的结构化数据
     """
     try:
-        logger.info(f"开始生成投资策略（包含相关性分析、多元线性回归、聚类分析、因子分析）: {company_name} {year}年")
+        _mt = (model_type or "").lower()
+        if _mt == "clustering":
+            logger.info(f"仅生成聚类分析: {company_name} {year}年")
+        elif _mt == "factor_only":
+            logger.info(f"仅生成因子分析: {company_name} {year}年")
+        elif _mt == "correlation_only":
+            logger.info(f"仅生成相关性分析: {company_name} {year}年")
+        else:
+            logger.info(f"开始生成投资策略（相关性分析、聚类分析、因子分析）: {company_name} {year}年")
         
         # 先检索表格，再检索年报文本（同一份年报）
         table_query = (
@@ -1894,18 +1924,38 @@ async def generate_profit_forecast_and_valuation(
             "不良贷款率 核心一级资本充足率 拨备覆盖率 "
             "零售贷款增速 对公新兴行业贷款增速 房地产敞口不良率"
         )
+        # 相关性分析专用：检索近三年核心财务指标（净息差、ROE、ROA、不良率、拨备覆盖率、成本收入比、信贷成本、资本充足率）
+        correlation_query = (
+            f"{company_name} 年报 近三年 历年 净息差 ROE ROA 不良率 拨备覆盖率 "
+            "成本收入比 信贷成本 资本充足率 主要指标 表 财务数据"
+        )
         table_data = query_engine.query(table_query)
         report_data = query_engine.query(report_query)
-        forecast_data = f"【表格】\n{str(table_data)}\n\n【年报文本】\n{str(report_data)}"
+        correlation_data = query_engine.query(correlation_query)
+        forecast_data = f"【表格】\n{str(table_data)}\n\n【年报文本】\n{str(report_data)}\n\n【相关性分析用-近三年核心指标】\n{str(correlation_data)}"
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
-        # 支持: all, correlation, clustering, correlation_only, regression_only, factor_only
+        # 支持: all, correlation, clustering, correlation_only, factor_only（已去掉 regression_only）
         normalized_model = (model_type or "all").lower()
-        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "regression_only", "factor_only"}:
+        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "factor_only"}:
             normalized_model = "all"
 
-        prompt = f"""
+        # 仅聚类模式：跳过指标抽取与相关性/因子，只执行聚类
+        if normalized_model == "clustering":
+            logger.info("仅生成聚类分析，跳过指标抽取与相关性/因子步骤")
+            result_dict = {
+                "indicator_extraction": [],
+                "variable_table": [],
+                "correlation_results": [],
+                "strategy_conclusion": {"short_term": "", "long_term": "", "risk_control": "", "key_signals": []},
+                "data_sufficiency": {"is_sufficient": False, "reason": "仅聚类模式，未执行指标抽取", "sample_description": None},
+                "notes": "",
+                "company_name": company_name,
+                "year": year,
+            }
+        else:
+            prompt = f"""
 作为资深投资分析师，请基于以下数据，为{company_name}生成"投资策略分析"的指标抽取与结构化数据。
 
 ## 数据来源
@@ -1919,15 +1969,25 @@ async def generate_profit_forecast_and_valuation(
 
 ### 1. 指标自动识别与抽取（多维度提取）
 
-请从年报中识别并抽取以下**多个维度**的指标数据：
+请从年报中识别并抽取以下**多个维度**的指标数据。**相关性分析要求至少近三年的数据**，不同年份的指标在命名和单位上保持一致。
 
-#### 维度1：核心财务指标（用于投资策略分析）
-- **收益类（因变量）**：股息率、分红率、ROE、ROA
-- **盈利类（自变量）**：净息差（NIM）、非息收入增速、净利息收入、手续费及佣金净收入
-- **风险类（自变量）**：不良贷款率、核心一级资本充足率、拨备覆盖率、信用减值损失
-- **业务类（自变量）**：零售贷款增速、对公贷款增速、零售存款增速、对公存款增速
-- **估值类（自变量）**：市净率（PB）、市盈率（PE）、总市值
-- **风险敞口类（自变量）**：房地产敞口不良率、房地产贷款占比
+#### 维度1：核心财务指标（用于相关性分析及投资策略，至少三年）
+**相关性分析必选指标（须至少覆盖近三年）**：
+- **净息差**（NIM）
+- **ROE**（净资产收益率）
+- **ROA**（资产净利率）
+- **不良率**（不良贷款率）
+- **拨备覆盖率**（投资覆盖率）
+- **成本收入比**
+- **信贷成本**
+- **资本充足率**（或核心一级资本充足率）
+
+其他可选指标（用于多元回归、聚类等）：
+- 收益类（因变量）：股息率、分红率
+- 盈利类：非息收入增速、净利息收入、手续费及佣金净收入
+- 业务类：零售贷款增速、对公贷款增速、零售存款增速、对公存款增速
+- 估值类：市净率（PB）、市盈率（PE）、总市值
+- 风险敞口类：房地产敞口不良率、房地产贷款占比
 
 #### 维度2：贷款产品维度（用于聚类和相关性分析）
 从年报中查找贷款产品分类表，提取：
@@ -1955,10 +2015,11 @@ async def generate_profit_forecast_and_valuation(
 - 资产/负债科目名称
 - 每个科目的：日均余额、利息收入/支出、平均收益率/成本率、变动率
 
-#### 维度7：时间序列数据（如果有多年数据）
-如果年报中有2-3年的历史数据，提取：
-- 年度指标：营业收入、净利润、总资产、ROE、不良率等核心指标
-- 季度数据（如果有）：各季度的收入、利润、现金流
+#### 维度7：时间序列数据（至少三年，用于相关性分析）
+**必须**：尽量提取至少**近三年**的年度数据，以便准确计算 Pearson 相关系数和趋势。
+- 年度指标：净息差、ROE、ROA、不良率、拨备覆盖率、成本收入比、信贷成本、资本充足率，以及营业收入、净利润、总资产等
+- 确保不同年份的指标命名与单位一致，避免分析误差
+- 季度数据（若有）：各季度的收入、利润、现金流
 
 ### 2. 数据提取要求
 
@@ -1977,14 +2038,13 @@ async def generate_profit_forecast_and_valuation(
 - period：期间（年份）
 - unit：单位（%、亿元、万元等）
 
-**重要**：如果某个维度有多个观测值（如多个产品、多个地区），每个观测值都要单独记录一行。
+**相关性分析强制要求**：对于以下 8 项核心指标——净息差、ROE、ROA、不良率、拨备覆盖率、成本收入比、信贷成本、资本充足率——**必须在 variable_table 中为每项指标填写至少三年的数据**（即同一 metric 多行，每行一个年份的 period 与 value）。例如：净息差 2022/2.5%、2023/2.4%、2024/2.3% 应占 3 行。若年报仅有两年或一年，则如实填写已有年份，以便后续步骤尽量计算或做定性分析。其他维度若有多个观测值（如多个产品、多个地区），每个观测值单独记录一行。
 
 ### 4. 输出要求（不要生成分析结果）
 
 - "correlation_results"必须输出空数组[]（由后续 LLM 生成）
 - "strategy_conclusion"中的字段保持为空字符串或空数组（由后续 LLM 生成）
 - "clustering_model"保持为null（由后续 LLM 生成）
-- "multiple_linear_regression"保持为null（由后续 LLM 生成）
 - "factor_analysis"保持为null（由后续 LLM 生成）
 
 ## ⚠️ 严格输出要求（必须遵守）
@@ -2040,157 +2100,150 @@ async def generate_profit_forecast_and_valuation(
 - 如果数据缺失，使用null或空数组[]
 - 所有字段都必须存在，不能省略
 - correlation_results必须保持空数组[]
+- **严格控制输出长度**：indicator_extraction 与 variable_table 优先列出相关性分析所需的 8 项核心指标（净息差、ROE、ROA、不良率、拨备覆盖率、成本收入比、信贷成本、资本充足率）及至少三年数据，其余维度可精简，避免输出过长导致 JSON 语法错误（如漏逗号、括号不匹配）。
 - 直接输出上述JSON结构，不要有任何其他内容
 """
 
-        # 使用结构化输出 - 添加异常处理和性能监控
-        response = None
-        import time
-        structured_llm_start = time.time()
-        try:
-            sllm = llm.as_structured_llm(ProfitForecastAndValuation)
-            raw_response = await sllm.achat([
-                ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
-                ChatMessage(role="user", content=prompt)
-            ])
-            
-            # 检查响应类型 - 处理字符串响应
-            if isinstance(raw_response, str):
-                logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化LLM返回字符串，尝试解析JSON")
-                import json
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', raw_response)
-                if json_match:
-                    parsed_data = json.loads(json_match.group(0))
-                    if 'investment_strategy' in parsed_data or 'profit_forecast_and_valuation' in parsed_data:
-                        parsed_data = parsed_data.get('investment_strategy') or parsed_data.get('profit_forecast_and_valuation') or parsed_data
-                    response = ProfitForecastAndValuation(**parsed_data) if isinstance(parsed_data, dict) and 'indicator_extraction' in parsed_data else parsed_data
-                else:
-                    raise ValueError("无法从字符串响应提取JSON")
-            elif isinstance(raw_response, ProfitForecastAndValuation):
-                response = raw_response
-            elif hasattr(raw_response, 'message') and hasattr(raw_response.message, 'content'):
-                # 处理Response对象，message.content可能是字符串
-                content = raw_response.message.content
-                if isinstance(content, str):
-                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 响应message.content是字符串，尝试解析JSON")
+        # 仅当非“仅聚类”模式时执行指标抽取 LLM
+        if normalized_model != "clustering":
+            # 使用结构化输出 - 添加异常处理和性能监控
+            response = None
+            import time
+            structured_llm_start = time.time()
+            try:
+                sllm = llm.as_structured_llm(ProfitForecastAndValuation)
+                raw_response = await sllm.achat([
+                    ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
+                    ChatMessage(role="user", content=prompt)
+                ])
+                # 检查响应类型 - 处理字符串响应
+                if isinstance(raw_response, str):
+                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化LLM返回字符串，尝试解析JSON")
                     import json
                     import re
-                    json_match = re.search(r'\{[\s\S]*\}', content)
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
                     if json_match:
                         parsed_data = json.loads(json_match.group(0))
                         if 'investment_strategy' in parsed_data or 'profit_forecast_and_valuation' in parsed_data:
                             parsed_data = parsed_data.get('investment_strategy') or parsed_data.get('profit_forecast_and_valuation') or parsed_data
                         response = ProfitForecastAndValuation(**parsed_data) if isinstance(parsed_data, dict) and 'indicator_extraction' in parsed_data else parsed_data
                     else:
-                        raise ValueError("无法从message.content提取JSON")
+                        raise ValueError("无法从字符串响应提取JSON")
+                elif isinstance(raw_response, ProfitForecastAndValuation):
+                    response = raw_response
+                elif hasattr(raw_response, 'message') and hasattr(raw_response.message, 'content'):
+                    content = raw_response.message.content
+                    if isinstance(content, str):
+                        logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 响应message.content是字符串，尝试解析JSON")
+                        import json
+                        import re
+                        json_match = re.search(r'\{[\s\S]*\}', content)
+                        if json_match:
+                            parsed_data = json.loads(json_match.group(0))
+                            if 'investment_strategy' in parsed_data or 'profit_forecast_and_valuation' in parsed_data:
+                                parsed_data = parsed_data.get('investment_strategy') or parsed_data.get('profit_forecast_and_valuation') or parsed_data
+                            response = ProfitForecastAndValuation(**parsed_data) if isinstance(parsed_data, dict) and 'indicator_extraction' in parsed_data else parsed_data
+                        else:
+                            raise ValueError("无法从message.content提取JSON")
+                    else:
+                        response = content
                 else:
-                    response = content
-            else:
-                response = raw_response
-            
-            structured_llm_time = time.time() - structured_llm_start
-            logger.info(f"✅ [generate_profit_forecast_and_valuation] 结构化输出成功，耗时: {structured_llm_time:.2f}秒")
-        except (AttributeError, ValueError, TypeError) as structured_error:
-            error_type = type(structured_error).__name__
-            error_msg = str(structured_error)
-            structured_llm_time = time.time() - structured_llm_start
-            
-            # 更详细的错误信息
-            if "model_dump_json" in error_msg or "AttributeError" in error_type:
-                logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化LLM返回了字符串而非Pydantic模型（耗时: {structured_llm_time:.2f}秒）")
-                logger.warning(f"[generate_profit_forecast_and_valuation] 错误类型: {error_type}, 错误信息: {error_msg}")
-                logger.info(f"[generate_profit_forecast_and_valuation] 这是LlamaIndex的已知问题，将尝试从字符串解析JSON")
-            else:
-                logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化输出失败（{error_type}，耗时: {structured_llm_time:.2f}秒）: {error_msg}")
-            
-            logger.info(f"[generate_profit_forecast_and_valuation] 尝试使用普通LLM输出并手动解析JSON")
-            # 回退到普通LLM输出
-            try:
-                normal_response = await llm.achat([
-                    ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
-                    ChatMessage(role="user", content=prompt)
-                ])
-                
-                # 提取并解析JSON
-                if hasattr(normal_response, 'message'):
-                    content = normal_response.message.content if hasattr(normal_response.message, 'content') else str(normal_response.message)
+                    response = raw_response
+                structured_llm_time = time.time() - structured_llm_start
+                logger.info(f"✅ [generate_profit_forecast_and_valuation] 结构化输出成功，耗时: {structured_llm_time:.2f}秒")
+            except (AttributeError, ValueError, TypeError) as structured_error:
+                error_type = type(structured_error).__name__
+                error_msg = str(structured_error)
+                structured_llm_time = time.time() - structured_llm_start
+                if "model_dump_json" in error_msg or "AttributeError" in error_type:
+                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化LLM返回了字符串而非Pydantic模型（耗时: {structured_llm_time:.2f}秒）")
+                    logger.warning(f"[generate_profit_forecast_and_valuation] 错误类型: {error_type}, 错误信息: {error_msg}")
+                    logger.info(f"[generate_profit_forecast_and_valuation] 这是LlamaIndex的已知问题，将尝试从字符串解析JSON")
                 else:
-                    content = str(normal_response)
-                
-                import json
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    json_str = json_match.group(0)
-                    parsed_data = json.loads(json_str)
-                    
-                    # 处理嵌套结构
-                    if 'investment_strategy' in parsed_data or 'profit_forecast_and_valuation' in parsed_data:
-                        parsed_data = parsed_data.get('investment_strategy') or parsed_data.get('profit_forecast_and_valuation') or parsed_data
-                    elif len(parsed_data) == 1:
-                        parsed_data = list(parsed_data.values())[0]
-                    
-                    try:
-                        response = ProfitForecastAndValuation(**parsed_data)
-                        logger.info(f"✅ 手动解析JSON成功")
-                    except Exception as validation_error:
-                        logger.warning(f"⚠️ JSON验证失败，返回部分数据: {str(validation_error)}")
-                        response = parsed_data if isinstance(parsed_data, dict) else {"content": content}
-                else:
-                    raise ValueError("无法从响应中提取JSON")
-            except Exception as fallback_error:
-                logger.error(f"❌ 回退方案也失败: {str(fallback_error)}")
-                response = {
-                    "error": f"生成失败: {str(fallback_error)}",
-                    "content": content if 'content' in locals() else str(fallback_error)
-                }
+                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 结构化输出失败（{error_type}，耗时: {structured_llm_time:.2f}秒）: {error_msg}")
+                logger.info(f"[generate_profit_forecast_and_valuation] 尝试使用普通LLM输出并手动解析JSON")
+                try:
+                    normal_response = await llm.achat([
+                        ChatMessage(role="system", content="你是一个专业的投资分析师,擅长相关性分析与投资策略。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
+                        ChatMessage(role="user", content=prompt)
+                    ])
+                    if hasattr(normal_response, 'message'):
+                        content = normal_response.message.content if hasattr(normal_response.message, 'content') else str(normal_response.message)
+                    else:
+                        content = str(normal_response)
+                    import json
+                    import re
+                    json_match = re.search(r'\{[\s\S]*\}', content)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        parsed_data = json.loads(json_str)
+                        if isinstance(parsed_data, dict):
+                            if 'investment_strategy' in parsed_data or 'profit_forecast_and_valuation' in parsed_data:
+                                parsed_data = parsed_data.get('investment_strategy') or parsed_data.get('profit_forecast_and_valuation') or parsed_data
+                            elif len(parsed_data) == 1:
+                                first_val = list(parsed_data.values())[0]
+                                parsed_data = first_val if isinstance(first_val, dict) else parsed_data
+                        if isinstance(parsed_data, dict) and ('indicator_extraction' in parsed_data or 'variable_table' in parsed_data):
+                            try:
+                                response = ProfitForecastAndValuation(**parsed_data)
+                                logger.info(f"✅ 手动解析JSON成功")
+                            except Exception as validation_error:
+                                logger.warning(f"⚠️ JSON验证失败，返回部分数据: {str(validation_error)}")
+                                response = parsed_data
+                        else:
+                            raise ValueError("无法从响应中提取有效结构（缺少 indicator_extraction 或 variable_table）")
+                    else:
+                        raise ValueError("无法从响应中提取JSON")
+                except Exception as fallback_error:
+                    logger.error(f"❌ 回退方案也失败: {str(fallback_error)}")
+                    response = {
+                        "error": f"生成失败: {str(fallback_error)}",
+                        "content": content if 'content' in locals() else str(fallback_error)
+                    }
 
-        logger.info(f"✅ 投资策略（相关性分析）生成成功")
-        
-        # 处理响应 - 确保返回字典格式
-        result_dict = None
-        
-        # 如果response是字典且包含error，直接返回
-        if isinstance(response, dict) and 'error' in response:
-            result_dict = response
-        # 首先检查是否是Pydantic模型
-        elif isinstance(response, ProfitForecastAndValuation):
-            result_dict = response.model_dump()
-        elif hasattr(response, 'raw'):
-            raw_data = response.raw
-            if hasattr(raw_data, 'model_dump'):
-                try:
-                    result_dict = raw_data.model_dump()
-                except Exception as e:
-                    logger.warning(f"model_dump() 失败: {e}")
-            elif isinstance(raw_data, dict):
-                result_dict = raw_data
-            elif isinstance(raw_data, str):
-                import json
-                try:
-                    result_dict = json.loads(raw_data)
-                except json.JSONDecodeError:
-                    result_dict = {"content": raw_data}
-            else:
-                result_dict = {"content": str(raw_data)}
-        
-        if result_dict is None:
-            if hasattr(response, 'model_dump'):
-                try:
-                    result_dict = response.model_dump()
-                except Exception:
-                    pass
-            elif isinstance(response, dict):
+            logger.info(f"✅ 投资策略（指标抽取）生成成功")
+            # 处理响应 - 确保返回字典格式
+            result_dict = None
+            if isinstance(response, dict) and 'error' in response:
                 result_dict = response
-            else:
-                result_dict = {"content": str(response)}
-        
-        if not isinstance(result_dict, dict):
-            result_dict = {"content": str(result_dict)}
-        
-        result_dict["company_name"] = company_name
-        result_dict["year"] = year
+            elif isinstance(response, ProfitForecastAndValuation):
+                result_dict = response.model_dump()
+            elif hasattr(response, 'raw'):
+                raw_data = response.raw
+                if hasattr(raw_data, 'model_dump'):
+                    try:
+                        result_dict = raw_data.model_dump()
+                    except Exception as e:
+                        logger.warning(f"model_dump() 失败: {e}")
+                elif isinstance(raw_data, dict):
+                    result_dict = raw_data
+                elif isinstance(raw_data, str):
+                    import json
+                    try:
+                        result_dict = json.loads(raw_data)
+                    except json.JSONDecodeError:
+                        result_dict = {"content": raw_data}
+                else:
+                    result_dict = {"content": str(raw_data)}
+            if result_dict is None:
+                if hasattr(response, 'model_dump'):
+                    try:
+                        result_dict = response.model_dump()
+                    except Exception:
+                        pass
+                elif isinstance(response, dict):
+                    result_dict = response
+                else:
+                    result_dict = {"content": str(response)}
+            if not isinstance(result_dict, dict):
+                result_dict = {"content": str(result_dict)}
+            result_dict["company_name"] = company_name
+            result_dict["year"] = year
+
+        # 若首轮指标抽取失败（返回了 error），直接返回错误，不执行后续分析
+        if isinstance(result_dict, dict) and result_dict.get("error"):
+            logger.warning(f"⚠️ 指标抽取或解析失败，跳过后续分析: {result_dict.get('error')}")
+            return result_dict
         
         # 数据验证和清理
         result_dict = _validate_and_clean_data(result_dict, ProfitForecastAndValuation)
@@ -2199,7 +2252,7 @@ async def generate_profit_forecast_and_valuation(
             if isinstance(data_sufficiency, dict) and not isinstance(data_sufficiency.get("is_sufficient"), bool):
                 data_sufficiency["is_sufficient"] = False
 
-        # 自动执行四个分析：相关性分析、多元线性回归、聚类、因子分析（支持单模块：correlation_only, regression_only, factor_only）
+        # 自动执行：相关性分析、聚类、因子分析（支持单模块：correlation_only, factor_only；已去掉多元回归）
         if isinstance(result_dict, dict):
             # 1. 相关性分析
             if normalized_model in {"correlation", "all", "correlation_only"}:
@@ -2235,26 +2288,41 @@ async def generate_profit_forecast_and_valuation(
                 if not has_conclusion:
                     import json
                     insight_prompt = f"""
-你是专业投资分析师，请仅基于给定的相关性结果与数据充分性说明，生成投资策略结论。
-不得新增或编造任何数值，不得虚构相关系数。
+你是专业投资分析师。请按以下流程生成**相关性分析报告的关键结论与洞察总结**，并**务必输出四类内容**，不得出现"无法生成"、"无法进行"、"无法识别"等消极表述。
 
-### 相关性结果
+## 输入数据
+
+### Pearson 相关系数结果（两两配对，可能为空）
 {json.dumps(result_dict.get("correlation_results") or [], ensure_ascii=False)}
 
 ### 数据充分性
 {json.dumps(result_dict.get("data_sufficiency") or {}, ensure_ascii=False)}
 
-### 输入变量表（供命名参考）
+### 输入变量表（指标与多年取值）
 {json.dumps(result_dict.get("variable_table") or [], ensure_ascii=False)}
 
-### 输出要求
-必须输出JSON且只输出JSON，结构如下：
+## 执行要求
+
+**步骤 3：关键结论生成**  
+基于 Pearson 相关系数矩阵（若不为空）或基于**输入变量表中的指标数值 + 行业常识**，生成以下四类内容：
+
+1. **高相关性指标**（short_term）：若相关系数结果非空，列出相关系数绝对值较高的指标对及业务含义；若为空，则根据变量表与银行业常识（如净息差与ROE通常正相关、ROA与ROE联动等）写出定性结论。
+2. **低相关性指标**（risk_control）：若相关系数结果非空，列出无显著相关或相关性很弱的指标对及风险提示；若为空，则根据常识说明哪些指标间通常关联较弱（如资本充足率与不良率）及需关注的其他风险因素。
+3. **趋势分析**（long_term）：若有多年数据或相关系数，说明指标间联动趋势与长期投资启示；若数据有限，则基于变量表已有年度与行业规律做简要趋势判断。
+4. **步骤 4：洞察总结**（key_signals）：用**示例句式**写出 2～4 条洞察句，每条说明一对指标之间的关系及投资含义。必须包含类似以下的表述风格（可结合实际数据调整）：
+   - "净息差与ROE呈现高度正相关，说明银行的盈利能力和息差变化紧密相关。"
+   - "信贷成本与成本收入比呈负相关，这意味着信贷成本较高时，银行可能面临更高的运营成本。"
+   - "资本充足率与不良率没有显著相关性，需关注其他潜在风险因素。"
+
+若相关系数结果为空或数据不足，在 notes 中可注明"部分结论基于有限数据或行业经验的定性分析"，但 short_term、long_term、risk_control、key_signals 四类内容仍须全部填写，不得留空或写"无法生成"。
+
+必须只输出一个 JSON 对象，结构如下：
 {{
   "strategy_conclusion": {{
-    "short_term": "短期配置结论",
-    "long_term": "长期配置结论",
-    "risk_control": "风险管控结论",
-    "key_signals": ["关键信号1", "关键信号2"]
+    "short_term": "高相关性指标描述（指标对+业务含义）",
+    "long_term": "趋势分析（联动趋势与长期启示）",
+    "risk_control": "低相关性指标与风险提示",
+    "key_signals": ["洞察句1", "洞察句2", "洞察句3"]
   }},
   "notes": "补充说明（可选）"
 }}
@@ -2298,21 +2366,7 @@ async def generate_profit_forecast_and_valuation(
                     "sample_description": None
                 }
             
-            # 2. 多元线性回归分析（LLM）
-            if normalized_model in {"correlation", "all", "regression_only"}:
-                if not result_dict.get("multiple_linear_regression"):
-                    logger.info("使用 LLM 执行多元线性回归分析")
-                    regression_result, regression_sufficiency = await _llm_multiple_linear_regression(
-                        result_dict.get("indicator_extraction") or [],
-                        result_dict.get("variable_table") or [],
-                        year,
-                        llm
-                    )
-                    result_dict["multiple_linear_regression"] = regression_result
-                    if not result_dict.get("regression_data_sufficiency"):
-                        result_dict["regression_data_sufficiency"] = regression_sufficiency
-            
-            # 3. 因子分析（LLM）
+            # 2. 因子分析（LLM）
             if normalized_model in {"correlation", "all", "factor_only"}:
                 if not result_dict.get("factor_analysis"):
                     logger.info("使用 LLM 执行因子分析")
@@ -2326,82 +2380,65 @@ async def generate_profit_forecast_and_valuation(
                     if not result_dict.get("factor_data_sufficiency"):
                         result_dict["factor_data_sufficiency"] = factor_sufficiency
 
-            # 4. 生成聚类分析模型（从表格+年报文本自动填充）
+            # 4. 生成聚类分析模型（规模—风险—增长 K-Means，可解释可决策）
             if normalized_model in {"clustering", "all"} and not result_dict.get("clustering_model"):
                 import json
                 clustering_prompt = f"""
-你是专业投研分析师，请基于以下数据生成"聚类分析模型（客群-标的适配分组）"。
-仅使用提供的数据，不要编造；缺失处用null或空字符串。
+你必须严格按照以下步骤执行聚类分析，并在最后只输出一个合法的 JSON 对象（见步骤七），不要输出 JSON 以外的任何文字、markdown 代码块或说明。系统会直接解析你回复中的 JSON。
 
-### 数据来源（表格优先，其次年报文本）
+## 数据来源（年报与表格）
+以下数据来自年报披露与相关指标，请据此提取并分析：
 {str(forecast_data)}
 
-### 核心任务：多维度聚类分析
+---
 
-你需要从年报中提取**多个维度的数据**进行聚类分析，识别不同的业务组合模式：
+一、明确聚类目标（必须先做）
+在内部推理中说明：本次聚类对象（如贷款类别/业务分部/产品线）、聚类目的（规模分层、风险分层、增长分层、战略取舍、结构优化、投资决策支持之一或组合）。
 
-#### 维度1：投资策略聚类（公司整体定位）
-基于以下指标对公司进行投资组合定位：
-- **估值维度**：市净率（PB）、市盈率（PE）
-- **盈利维度**：加权平均ROE、ROA、净息差（NIM）
-- **风险维度**：还原后不良贷款率、核心一级资本充足率、拨备覆盖率
-- **增长维度**：总资产增速、贷款增速、营业收入增速
-- **防御维度**：股息率、分红率
+二、原始数据整理
+从年报中提取横向可比数据，至少包含：规模类（余额/收入/资产或占比）、风险质量类（不良率/违约率/毛利率等）、成长性（同比/环比/CAGR）。在推理中整理成表格式。
 
-**聚类结果（固定K=3）**：
-- 组别1：高股息低估值防御组（PB<0.6、股息率>5%、ROE10%-11%、不良率1.7%-1.8%）
-- 组别2：稳健增长组（PB0.6-0.8、ROE12%-15%、不良率1.0%-1.5%、增速5%-10%）
-- 组别3：高增长高弹性组（PB>0.8、ROE>15%、不良率<1.0%、增速>10%）
+三、数据标准化处理
+对数值做标准化（Min-Max 或 Z-score），在推理中给出标准化表示例；若某指标完全相同则说明对聚类贡献有限。
 
-#### 维度2：贷款产品聚类（产品组合分析）
-如果年报中有贷款产品分类数据，基于以下指标对产品进行聚类：
-- 余额、占比、不良率、余额变动率、增速
-- 识别：低风险-低增长、中风险-高增长、高风险-大幅收缩等模式
+四、执行 K-Means 聚类
+在推理中说明采用的 k 值及聚类过程。
 
-#### 维度3：地区经营聚类（区域组合分析）
-如果年报中有地区经营数据，基于以下指标对地区进行聚类：
-- 贷款余额、存款余额、存贷比、不良率、贷款占比、存款占比
-- 识别：低风险边缘区、高风险集中区、中等风险主力区等模式
+五、业务语义命名（关键步骤）
+为每个 Cluster 赋予业务含义标签（如：增长型核心资产、稳健基石资产、收缩调整资产等），不得只写 Cluster 1/2/3，并说明命名逻辑。
 
-### 参考行业对标对象（如有披露）
-招行、兴业、股份行均值（2024年）
+六、聚类结果汇总
+在推理中完成：聚类与成员、规模/风险/增长特征、战略含义；分析哪类是增长引擎、稳定器、需压降或调整，是否存在资源错配。
 
-### 输出要求
-
-### 输出要求
-必须输出JSON且只输出JSON，结构如下：
+七、结构化 JSON 输出（你必须执行的最后一步）
+你的回复中必须且只能包含一个 JSON 对象，严禁在 JSON 前后添加任何说明、标题或 ```json 等标记。结构必须如下，将聚类结果放在 "clustering_model" 键下：
 {{
   "clustering_model": {{
-    "method": "K-means",
+    "method": "k-means",
     "k": 3,
-    "variable_table": [
+    "dimensions": ["规模", "风险", "增长"],
+    "clusters": [
       {{
-        "dimension": "估值维度",
-        "metric": "市净率（PB）",
-        "company_value": "0.55",
-        "industry_benchmark": "招行0.82、兴业0.61、股份行均值0.73"
+        "name": "业务含义标签（如：增长型核心资产）",
+        "members": ["成员1", "成员2"],
+        "characteristics": "规模/风险/增长特征描述",
+        "strategy_implication": "战略含义"
       }}
     ],
-    "group_results": [
-      {{
-        "group_name": "组别1：高股息低估值防御组",
-        "feature_profile": "PB<0.6、股息率>5%、ROE10%-11%、还原后不良率1.7%-1.8%",
-        "company_assignment": "核心标的/边缘标的/暂不归属",
-        "investor_profile": "收益目标5%-8%、风险容忍度低、流动性需求中",
-        "time_risk_bucket": "短期（6-12个月）-低风险"
-      }}
-    ],
-    "conclusion": {{
-      "current_position": "当前分组结论",
-      "upgrade_conditions": "进入稳健增长组条件",
-      "high_growth_conditions": "进入高增长高弹性组条件"
-    }}
+    "core_insights": ["核心发现1", "核心发现2"],
+    "risk_notes": ["风险提示1", "风险提示2"]
   }}
 }}
+- core_insights：3–5 条核心发现（结论+简短解释），例如：高风险业务是否收缩、规模最大板块是否增长放缓、低风险板块是否承担稳定器、战略与资源分布是否匹配。
+- risk_notes：1–3 条风险提示。
+- clusters 内 name、members、characteristics、strategy_implication 均需根据步骤一至六的推理结果填写，不要留空。
+
+八、执行要求
+请先按步骤一至六在内部完成推理与数据整理，然后只输出步骤七中的 JSON 对象，不要输出步骤一至六的中间文字。现在请直接输出 JSON。
 """
                 try:
                     clustering_response = await llm.achat([
-                        ChatMessage(role="system", content="你是专业投研分析师，必须严格输出JSON。"),
+                        ChatMessage(role="system", content="你是专业投研分析师，专门执行 K-Means 聚类（规模—风险—增长）。你必须严格按用户给出的步骤一至八执行：在内部完成步骤一至六的推理与数据整理，最后只输出一个合法的 JSON 对象（包含 clustering_model 键）。禁止输出 JSON 以外的任何内容（包括说明、markdown、代码块标记）。"),
                         ChatMessage(role="user", content=clustering_prompt)
                     ])
                     if hasattr(clustering_response, 'message'):
@@ -2411,15 +2448,41 @@ async def generate_profit_forecast_and_valuation(
                     import re
                     json_match = re.search(r'\{[\s\S]*\}', clustering_content)
                     if json_match:
-                        parsed = json.loads(json_match.group(0))
+                        # 去掉 JSON 字符串内的控制字符（如未转义换行），避免 Invalid control character 解析错误
+                        json_str = re.sub(r'[\x00-\x1f]', ' ', json_match.group(0))
+                        parsed = json.loads(json_str)
                         clustering_model = parsed.get("clustering_model") if isinstance(parsed, dict) else None
                         if isinstance(clustering_model, dict):
+                            # 若为新版结构（clusters + core_insights），兼容旧版 group_results / conclusion
+                            clusters = clustering_model.get("clusters") or []
+                            if clusters and not clustering_model.get("group_results"):
+                                clustering_model["group_results"] = [
+                                    {
+                                        "group_name": c.get("name", ""),
+                                        "feature_profile": c.get("characteristics", ""),
+                                        "company_assignment": "",
+                                        "investor_profile": "",
+                                        "time_risk_bucket": c.get("strategy_implication", "")
+                                    }
+                                    for c in clusters if isinstance(c, dict)
+                                ]
+                            if not clustering_model.get("conclusion"):
+                                core_insights = clustering_model.get("core_insights") or []
+                                risk_notes = clustering_model.get("risk_notes") or []
+                                clustering_model["conclusion"] = {
+                                    "current_position": core_insights[0] if core_insights else "",
+                                    "upgrade_conditions": core_insights[1] if len(core_insights) > 1 else "",
+                                    "high_growth_conditions": risk_notes[0] if risk_notes else ""
+                                }
+                            if not clustering_model.get("variable_table") and clusters:
+                                dims = clustering_model.get("dimensions") or ["规模", "风险", "增长"]
+                                clustering_model["variable_table"] = [{"dimension": d, "metric": d, "company_value": "", "industry_benchmark": ""} for d in dims]
                             result_dict["clustering_model"] = clustering_model
                 except Exception as clustering_error:
                     logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 聚类模型生成失败: {str(clustering_error)}")
             
             # 5. 生成综合洞察文本（基于四个分析的结果）
-            if normalized_model == "all" and result_dict.get("correlation_results") or result_dict.get("multiple_linear_regression") or result_dict.get("factor_analysis") or result_dict.get("clustering_model"):
+            if normalized_model == "all" and (result_dict.get("correlation_results") or result_dict.get("factor_analysis") or result_dict.get("clustering_model")):
                 import json
                 comprehensive_insight_prompt = f"""
 你是专业投资分析师，请基于以下四个分析结果，为{company_name}生成深度、可操作的投资策略洞察报告。
@@ -2429,26 +2492,21 @@ async def generate_profit_forecast_and_valuation(
 ### 1. 相关性分析结果
 {json.dumps(result_dict.get("correlation_results") or [], ensure_ascii=False, indent=2)}
 
-### 2. 多元线性回归分析结果
-{json.dumps(result_dict.get("multiple_linear_regression") or {}, ensure_ascii=False, indent=2)}
-
-### 3. 因子分析结果
+### 2. 因子分析结果
 {json.dumps(result_dict.get("factor_analysis") or {}, ensure_ascii=False, indent=2)}
 
-### 4. 聚类分析结果
+### 3. 聚类分析结果
 {json.dumps(result_dict.get("clustering_model") or {}, ensure_ascii=False, indent=2)}
 
-### 5. 策略结论（已有）
+### 4. 策略结论（已有）
 {json.dumps(result_dict.get("strategy_conclusion") or {}, ensure_ascii=False, indent=2)}
 
-### 6. 输入变量表（参考）
+### 5. 输入变量表（参考）
 {json.dumps(result_dict.get("variable_table") or [], ensure_ascii=False, indent=2)}
 
 ## 输出要求
 
-请生成一份**专业、深入、可操作**的投资策略洞察报告，必须包含以下内容：
-
-### 一、相关性分析洞察
+请生成一份**专业、深入、可操作**的投资策略洞察报告，必须包含以下内容（不含多元线性回归）：
 
 **要求**：
 1. 识别**强相关关系**（相关系数绝对值>0.7）和**中等相关关系**（0.5-0.7）
@@ -2463,25 +2521,7 @@ async def generate_profit_forecast_and_valuation(
 - "贷款余额与不良率相关系数高达0.869，说明规模大的区域不良率也偏高，可能存在区域集中度风险"
 - "余额变动率与不良率变动相关系数仅0.281，说明压缩规模的产品不良率未必改善，需要关注资产质量而非单纯规模控制"
 
-### 二、多元线性回归洞察
-
-**要求**：
-1. 解释**回归系数的经济含义**：
-   - 每个自变量对因变量的影响方向和强度
-   - 哪些因素是主要驱动因素？
-   - 哪些因素影响较小？
-2. 评估**模型解释力**（R²）：
-   - R²>0.6：模型解释力较好
-   - R²在0.4-0.6：模型解释力中等
-   - R²<0.4：模型解释力较弱，需要补充更多变量
-3. 识别**关键驱动因素**：哪些自变量的系数最大，对因变量影响最显著？
-4. 给出**预测性建议**：基于回归模型，如果要改善因变量，应该重点调整哪些自变量？
-
-**示例格式**：
-- "回归模型显示，占比系数最大(9.12)，说明贷款占比越高不良率越高，需要关注贷款结构优化"
-- "R²=0.626，模型解释力中等，说明不良率还受其他因素影响（如宏观经济、行业周期等）"
-
-### 三、因子分析洞察
+### 二、因子分析洞察
 
 **要求**：
 1. 解释**每个因子的业务含义**：
@@ -2497,7 +2537,7 @@ async def generate_profit_forecast_and_valuation(
 - "因子1（规模因子）解释了45%的方差，存款余额和存款占比载荷极高(>0.99)，反映公司存款吸纳能力强"
 - "因子2（风险因子）解释了32%的方差，贷款余额和不良率载荷高，反映贷款风险集中度，需要关注风险分散"
 
-### 四、聚类分析洞察
+### 三、聚类分析洞察
 
 **要求**：
 1. 描述**每个聚类的特征**：
@@ -2517,10 +2557,10 @@ async def generate_profit_forecast_and_valuation(
 - "聚类结果显示，公司正在主动'压缩高风险零售贷款，扩张对公企业贷款'，第三类产品（信用卡、消费贷、经营贷）是风险出清的重点"
 - "公司当前定位为'中风险-高增长'组，如果要进入'低风险-稳健增长'组，需要将不良率控制在0.5%以下，同时保持ROE在12%以上"
 
-### 五、综合投资策略建议
+### 四、综合投资策略建议
 
 **要求**：
-1. **整合四个分析的发现**，形成统一的投资逻辑
+1. **整合相关性、因子、聚类三个分析的发现**，形成统一的投资逻辑
 2. **识别核心投资亮点**：基于分析，公司的核心优势是什么？
 3. **识别关键风险点**：需要重点关注哪些风险？
 4. **给出具体投资建议**：
@@ -2539,16 +2579,13 @@ async def generate_profit_forecast_and_valuation(
 ## 一、相关性分析洞察
 [详细内容]
 
-## 二、多元线性回归洞察
+## 二、因子分析洞察
 [详细内容]
 
-## 三、因子分析洞察
+## 三、聚类分析洞察
 [详细内容]
 
-## 四、聚类分析洞察
-[详细内容]
-
-## 五、综合投资策略建议
+## 四、综合投资策略建议
 [详细内容]
 ```
 
