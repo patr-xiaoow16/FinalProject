@@ -2331,10 +2331,19 @@ body {
     margin-bottom: 4px;
     font-size: 0.8em;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 4px;
     font-weight: 600;
-    line-height: 1.2;
+    line-height: 1.5;
+    flex-wrap: wrap;
+    white-space: normal;
+    overflow: visible;
+    max-height: none;
+}
+.insight-item h4 span {
+    white-space: normal;
+    word-break: normal;
+    overflow: visible;
 }
 
 .insight-item ul {

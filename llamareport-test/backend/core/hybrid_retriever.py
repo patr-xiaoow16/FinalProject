@@ -494,12 +494,14 @@ class HybridRetriever:
         return results
     
     def _retrieve_table_first(self, query: str, top_k: int) -> List[Dict[str, Any]]:
-        """先 Excel 表格再 PDF 表格，再 Excel 文本再 PDF 文本"""
+        """先检索上传的所有表格数据，再检索 PDF/文本（先 table_index 再 text_index）"""
         results = []
-        # 表格检索多取一些，便于命中「年度指标」等汇总表
-        table_top_k = min(50, max(top_k * 2, 40))
+        # 表格优先多取，便于先拿满表格再补文本
+        table_top_k = min(80, max(top_k * 3, 50))
+        # 文本在表格之后追加，数量不超过 top_k
+        text_top_k = top_k
         
-        # 1. 先检索表格索引（Excel 表 + PDF 表，后面按 source_type 排成 Excel 在前）
+        # 1. 先检索表格索引（所有上传的表格：Excel + PDF 表）
         if self.table_index:
             table_retriever = VectorIndexRetriever(index=self.table_index, similarity_top_k=table_top_k)
             table_nodes = table_retriever.retrieve(query)
@@ -510,9 +512,9 @@ class HybridRetriever:
                 })
             logger.info(f"📊 表格优先检索: 表格结果 {len(table_nodes)} 条（含 Excel/PDF 表）")
         
-        # 2. 再检索文本索引（PDF/Excel 文本，后面按 source_type 排成 Excel 在前）
+        # 2. 再检索文本索引（PDF/Excel 文本，追加在表格之后）
         if self.text_index:
-            text_retriever = VectorIndexRetriever(index=self.text_index, similarity_top_k=top_k)
+            text_retriever = VectorIndexRetriever(index=self.text_index, similarity_top_k=text_top_k)
             text_nodes = text_retriever.retrieve(query)
             for node in text_nodes:
                 results.append({

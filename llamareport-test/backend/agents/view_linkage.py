@@ -26,6 +26,8 @@ from models.visualization_models import (
     VisualizationResponse
 )
 
+from domain_knowledge_retriever import retrieve_domain_knowledge
+
 logger = logging.getLogger(__name__)
 
 
@@ -290,9 +292,16 @@ class LinkageGenerationEngine:
                     logger.warning(f"⚠️ RAG检索失败，继续使用现有信息: {str(e)}")
                     retrieved_documents = ""
             
+            # ⭐步骤3.5：检索领域知识（在生成联动查询之前）
+            domain_knowledge_snippet = retrieve_domain_knowledge(
+                key_metrics=chart_summary.key_metrics,
+                original_query=original_query,
+            )
+
             prompt = self._build_linkage_analysis_prompt(
-                chart_summary, original_query, original_answer, related_text, 
-                exploration_question, retrieved_documents  # ⭐新增：检索到的文档
+                chart_summary, original_query, original_answer, related_text,
+                exploration_question, retrieved_documents,
+                domain_knowledge_snippet=domain_knowledge_snippet,
             )
             
             response = await self._call_llm(prompt)
@@ -314,9 +323,10 @@ class LinkageGenerationEngine:
         original_answer: str,
         related_text: Optional[str],
         exploration_question: Optional[str] = None,  # ⭐新增参数
-        retrieved_documents: Optional[str] = None  # ⭐新增：检索到的文档数据
+        retrieved_documents: Optional[str] = None,  # ⭐新增：检索到的文档数据
+        domain_knowledge_snippet: Optional[str] = None,  # ⭐步骤3.5：领域知识片段
     ) -> str:
-        """构建联动分析的完整Prompt（整合探索问题和检索到的文档）"""
+        """构建联动分析的完整Prompt（整合探索问题、检索文档与领域知识）"""
         exploration_section = ""
         if exploration_question:
             exploration_section = f"""
@@ -345,7 +355,17 @@ class LinkageGenerationEngine:
 - 如果文档数据与视图数据有差异，请指出并分析原因
 - 在生成洞察时，优先使用文档中的具体数据
 """
-        
+
+        # ⭐步骤3.5：领域知识片段（在步骤4生成联动查询之前供参考）
+        domain_knowledge_section = ""
+        if domain_knowledge_snippet:
+            domain_knowledge_section = f"""
+### 【步骤3.5】领域知识（系统已检索，供步骤4参考）
+以下为根据当前视图指标/查询检索到的领域知识，请在「生成联动查询」时优先使用其中的组成项作为检索维度，并参考建议图表类型。
+
+{domain_knowledge_snippet}
+"""
+
         return f"""
 你是一个专业的财务分析专家，擅长分析图表与文本的关联，并生成深度洞察。
 
@@ -430,10 +450,16 @@ class LinkageGenerationEngine:
 
 **请选择最符合的关系类型，并说明理由。**
 
+{domain_knowledge_section}
+
 ### 【步骤4】生成联动查询
 根据确定的关系类型，生成数据检索查询：
 - 需要检索什么数据？（指标、维度、时间范围）
 - 数据来源建议？（从哪些文档/表格中检索）
+- **若【步骤3.5】提供了该指标的组成项，则必须严格遵守：**
+  - required_data.dimensions 与 required_data.required_fields **必须完整列出全部组成项**，每项单独一个元素，不得合并（如不得将"手续费及佣金净收入"与"其他非利息收入"合并为"非利息净收入"）、不得省略、不得改写名称。
+  - 若提供了建议图表，chart_type 须采用建议图表（如堆叠柱状图、堆叠面积图）。
+  - 示例：组成项为"利息净收入、手续费及佣金净收入、其他非利息收入"时，dimensions 应为 ["利息净收入", "手续费及佣金净收入", "其他非利息收入"]，required_fields 同上。
 
 ### 【步骤5】检索相关数据
 （此步骤由系统自动执行，检索结果已包含在"检索到的原始文档数据"部分）
@@ -545,6 +571,7 @@ class LinkageGenerationEngine:
                 "min_data_points": 3,
                 "data_source_hints": ["从利润表检索", "从业务描述中提取"]
             }}
+注意：若步骤3.5给出了组成项（如利息净收入、手续费及佣金净收入、其他非利息收入），dimensions 与 required_fields 必须按组成项逐项填写，与步骤3.5完全一致，series 的 name 将使用这些名称。
         }}
     ],
     "view_generation_strategy": [
@@ -763,7 +790,16 @@ class DataRetriever:
                 "year": year
             }
             
-            result = self.rag_engine.query(query, context_filter=context_filter)
+            # 视图联动数据检索：多取文档，且 RAG 内部分先表格后 PDF
+            result = self.rag_engine.query(query, context_filter=context_filter, top_k=28)
+            
+            # 【调试】打印 RAG 检索到的原始回答
+            rag_answer = result.get("answer", "")
+            print("\n" + "=" * 80)
+            print("[调试] RAG 检索到的原始回答（用于数据提取）")
+            print("=" * 80)
+            print(rag_answer[:4000] + ("..." if len(rag_answer) > 4000 else ""))
+            print("=" * 80 + "\n")
             
             # 提取结构化数据
             extracted_data = await self._extract_structured_data(
@@ -780,10 +816,21 @@ class DataRetriever:
             # 评估质量
             quality = self._assess_data_quality(extracted_data, validation)
             
+            # 【调试】打印提取后的结构化数据（base 检索）
+            print("\n" + "=" * 80)
+            print("[调试] 提取后的结构化数据（retrieve_and_validate_data）")
+            print("=" * 80)
+            print(json.dumps({k: v for k, v in extracted_data.items()}, ensure_ascii=False, indent=2)[:3000] + ("..." if len(json.dumps(extracted_data)) > 3000 else ""))
+            print("=" * 80 + "\n")
+            
+            # 将 RAG 原始回答写入 retrieved_data.raw_text，供生成新视图时使用
+            retrieved_data = dict(extracted_data)
+            retrieved_data["raw_text"] = result.get("answer", "")
+            
             return {
                 "data_available": validation.get("is_complete", False) or quality != "low",
                 "data_quality": quality,
-                "retrieved_data": extracted_data,
+                "retrieved_data": retrieved_data,
                 "missing_fields": validation.get("missing_fields", []),
                 "data_sources": result.get("sources", []),
                 "validation_result": validation,
@@ -815,7 +862,14 @@ class DataRetriever:
         main_metric = required_data.get("main_metric", chart_summary.key_metrics[0] if chart_summary.key_metrics else "相关指标")
         
         if data_type == "breakdown":
-            dimension = required_data.get("dimensions", [""])[0] if required_data.get("dimensions") else "维度"
+            dimensions = required_data.get("dimensions") or required_data.get("required_fields") or []
+            if dimensions:
+                # 使用全部组成项构建查询，便于 RAG 检索到各系列数据（与领域知识一致）
+                dim_str = "、".join(dimensions) if isinstance(dimensions[0], str) else str(dimensions[0])
+                if len(dimensions) > 1:
+                    dim_str = "、".join(str(d) for d in dimensions)
+                return f"{company_name} {year}年 {main_metric} 按（{dim_str}）拆分 历史数据"
+            dimension = "维度"
             return f"{company_name} {year}年 {main_metric} 按{dimension}拆分 历史数据"
         elif data_type == "events":
             time_range = required_data.get("time_range", {})
@@ -837,6 +891,15 @@ class DataRetriever:
     ) -> Dict[str, Any]:
         """从LLM回答中提取结构化数据"""
         try:
+            # 期望的系列名称（来自领域知识/联动分析，必须用于 series[].name）
+            expected_series_names = required_data.get("dimensions") or required_data.get("required_fields") or []
+            series_names_instruction = ""
+            if expected_series_names and len(expected_series_names) >= 2:
+                series_names_instruction = f"""
+**重要**：以下系列名称必须原样用于 series[].name，不得增删改：{expected_series_names}
+若有拆分/多系列数据，series 必须为与上述名称一一对应的 {len(expected_series_names)} 个系列，name 依次为上述各项。
+"""
+
             # 使用LLM进行二次提取
             prompt = f"""
 请从以下文本中提取结构化数据，用于生成图表。
@@ -845,12 +908,13 @@ class DataRetriever:
 {answer[:2000]}
 
 数据类型：{required_data.get('data_type', 'time_series')}
-期望维度：{required_data.get('dimensions', [])}
+期望维度/系列名称：{required_data.get('dimensions', []) or required_data.get('required_fields', [])}
+{series_names_instruction}
 
 请提取以下信息（JSON格式）：
-1. labels: 时间标签列表（如["2022", "2023", "2024"]）
-2. series: 系列数据列表，每个系列包含name和values（如果是拆分数据）
-3. values: 数值列表（如果是单一系列）
+1. labels: 时间标签列表（如["2022", "2023", "2024"]），一般为年份或时间点，不要用"点1、点2"等
+2. series: 系列数据列表，每个系列包含 name 和 values（若是拆分数据，name 必须使用上面给出的系列名称）
+3. values: 数值列表（仅当单一系列时使用）
 4. unit: 数值单位（如"亿元"、"%"等）
 
 示例输出（拆分数据）：
@@ -876,19 +940,121 @@ class DataRetriever:
             ]
             
             response = Settings.llm.chat(messages)
-            data = json.loads(response.message.content)
+            content = (response.message.content or "").strip()
+            # 容错：先尝试整段解析，再尝试从 markdown 代码块或首段 JSON 提取
+            data = None
+            try:
+                data = json.loads(content)
+            except Exception:
+                pass
+            if data is None:
+                json_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', content)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(1))
+                    except Exception:
+                        pass
+            if data is None:
+                brace = re.search(r'\{[\s\S]*?"labels"[\s\S]*?"series"[\s\S]*?\}', content)
+                if brace:
+                    try:
+                        data = json.loads(brace.group(0))
+                    except Exception:
+                        pass
+            if data is None:
+                raise ValueError("无法从响应中解析 JSON")
             return data
         except Exception as e:
             logger.warning(f"LLM数据提取失败，尝试正则提取: {str(e)}")
-            # 降级：使用正则表达式提取
-            return self._extract_data_with_regex(answer)
+            # 降级：使用正则表达式提取（传入 required_data 以便使用期望的系列名称）
+            return self._extract_data_with_regex(answer, required_data)
     
-    def _extract_data_with_regex(self, text: str) -> Dict[str, Any]:
-        """使用正则表达式提取数据（降级方案，改进：提取labels）"""
-        data = {"labels": [], "values": [], "unit": ""}
-        
-        # ⭐改进：提取时间标签（年份、季度等）
-        # 提取年份：2022、2023、2024等
+    def _extract_data_with_regex(self, text: str, required_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """使用正则表达式提取数据（降级方案）；若 required_data 含 dimensions/required_fields，则按该列表生成 series 名称。"""
+        required_data = required_data or {}
+        expected_series = required_data.get("dimensions") or required_data.get("required_fields") or []
+        data = {"labels": [], "values": [], "series": [], "unit": ""}
+
+        # ⭐优先：若已知期望的系列名称，先尝试按「指标名所在行」提取表格中的金额，避免把年份/占比当数值
+        if expected_series and len(expected_series) >= 2:
+            years = re.findall(r'20\d{2}', text)
+            if years:
+                data["labels"] = sorted(list(set(years)))[:10]
+            n_labels = len(data["labels"]) or 3
+            n_series = len(expected_series)
+            # 表格感知：若文本含 | 且含指标名，按行提取每行后的金额（>50 视为金额，过滤占比）
+            if '|' in text and any(n in text for n in expected_series):
+                for name in expected_series:
+                    row_vals = []
+                    for line in text.split('\n'):
+                        if name not in line:
+                            continue
+                        # 该行中的数字，过滤掉年份(2000-2030)和过小的占比
+                        nums = re.findall(r'[\d,]+\.?\d*', line)
+                        for n in nums:
+                            try:
+                                v = float(n.replace(',', ''))
+                                if 2000 <= v <= 2030:
+                                    continue
+                                if v > 1e12:
+                                    continue
+                                # 单位亿元时只保留金额级(>=80)，过滤占比(如63.7%、10.9%)
+                                if "亿元" in text and v < 80:
+                                    continue
+                                if v < 20:
+                                    continue
+                                row_vals.append(v)
+                            except ValueError:
+                                continue
+                        if row_vals:
+                            break
+                    if row_vals and len(row_vals) >= n_labels:
+                        row_vals = row_vals[:n_labels]
+                    elif row_vals:
+                        row_vals = row_vals[:n_labels]
+                    data["series"].append({"name": name, "values": row_vals})
+                if all(s.get("values") for s in data["series"]):
+                    if not data["unit"] and "亿元" in text:
+                        data["unit"] = "亿元"
+                    return data
+                data["series"] = []
+            # 非表格或按行提取不足时：收集数值并过滤年份/占比后再均分
+            numbers = re.findall(r'[\d,]+\.?\d*', text)
+            num_list = []
+            for n in numbers[:80]:
+                try:
+                    v = float(n.replace(',', ''))
+                    if 2000 <= v <= 2030:
+                        continue
+                    if v < 20 and v != int(v):
+                        continue
+                    if abs(v) >= 1e12:
+                        continue
+                    num_list.append(v)
+                except ValueError:
+                    continue
+            n_per_series = n_labels
+            if num_list and len(num_list) >= n_series * n_per_series:
+                for i, name in enumerate(expected_series):
+                    start = i * n_per_series
+                    data["series"].append({"name": name, "values": num_list[start: start + n_per_series]})
+            elif num_list:
+                for name in expected_series:
+                    data["series"].append({"name": name, "values": num_list[:n_per_series]})
+            else:
+                for name in expected_series:
+                    data["series"].append({"name": name, "values": []})
+            if not data["labels"] and data["series"] and data["series"][0].get("values"):
+                data["labels"] = [f"期{i+1}" for i in range(len(data["series"][0]["values"]))]
+            for u in ['亿元', '万元', '%', '倍']:
+                if u in text:
+                    data["unit"] = u
+                    break
+            if data["series"]:
+                return data
+            data["series"] = []
+
+        # 原有逻辑：无期望系列时按时间/数值提取
         years = re.findall(r'20\d{2}', text)
         if years:
             data["labels"] = sorted(list(set(years)))[:10]  # 去重并排序，最多10个
@@ -1088,6 +1254,9 @@ class NewViewGenerator:
                     requirement, chart_summary, company_name, year,
                     synthesis_insight, card_analysis
                 )
+                # 单位换算：元/万元 -> 亿元，便于绘图时数值更易读
+                if data_result.get("retrieved_data"):
+                    data_result["retrieved_data"] = self._convert_retrieved_data_units(data_result["retrieved_data"])
                 
                 # 根据数据验证结果，使用LLM生成视图
                 if data_result["data_available"] and data_result["data_quality"] in ["high", "medium"]:
@@ -1134,7 +1303,7 @@ class NewViewGenerator:
                     from models.visualization_models import VisualizationResponse, PlotlyChartConfig, ChartType, ChartTrace, ChartLayout
                     fallback_viz = VisualizationResponse(
                         chart_config=PlotlyChartConfig(
-                            chart_type=ChartType.bar,
+                            chart_type=ChartType.BAR,
                             traces=[ChartTrace(name="数据", x=["数据"], y=[0], type="bar")],
                             layout=ChartLayout(title="视图生成中，请稍候...", height=300)
                         ),
@@ -1156,7 +1325,7 @@ class NewViewGenerator:
             from models.visualization_models import VisualizationResponse, PlotlyChartConfig, ChartType, ChartTrace, ChartLayout
             default_viz = VisualizationResponse(
                 chart_config=PlotlyChartConfig(
-                    chart_type=ChartType.bar,
+                    chart_type=ChartType.BAR,
                     traces=[ChartTrace(name="数据", x=["数据"], y=[0], type="bar")],
                     layout=ChartLayout(title="综合分析视图", height=300)
                 ),
@@ -1215,7 +1384,7 @@ class NewViewGenerator:
                         
                         logger.info(f"📚 基于综合洞察检索数据: {insight_query[:100]}...")
                         context_filter = {"company": company_name, "year": year}
-                        insight_result = self.rag_engine.query(insight_query, context_filter=context_filter)
+                        insight_result = self.rag_engine.query(insight_query, context_filter=context_filter, top_k=20)
                         
                         if insight_result and insight_result.get('answer'):
                             insight_documents = insight_result['answer']
@@ -1249,7 +1418,7 @@ class NewViewGenerator:
                         
                         logger.info(f"📚 基于多视图关系检索数据: {relationship_query[:100]}...")
                         context_filter = {"company": company_name, "year": year}
-                        relationship_result = self.rag_engine.query(relationship_query, context_filter=context_filter)
+                        relationship_result = self.rag_engine.query(relationship_query, context_filter=context_filter, top_k=20)
                         
                         if relationship_result and relationship_result.get('answer'):
                             relationship_documents = relationship_result['answer']
@@ -1327,6 +1496,19 @@ class NewViewGenerator:
                     merged_result["data_quality"] = "low"
             
             logger.info(f"✅ 增强数据检索完成: 数据点={len(merged_data.get('values', []))}, 系列数={len(merged_data.get('series', []))}, 文档长度={len(all_documents)}")
+            # 便于排查：输出检索到的结构化数据摘要（不含 raw_text）
+            _summary = self._retrieved_data_summary(merged_data)
+            logger.info(f"📊 检索数据摘要: {_summary}")
+            # 【调试】打印最终用于生成视图的 retrieved_data（合并后）
+            _detail = {k: v for k, v in merged_data.items() if k not in ("raw_text", "insight_documents", "relationship_documents")}
+            print("\n" + "=" * 80)
+            print("[调试] 最终用于生成视图的 retrieved_data（合并后，不含 raw_text）")
+            print("=" * 80)
+            print(json.dumps(_detail, ensure_ascii=False, indent=2)[:3500] + ("..." if len(json.dumps(_detail)) > 3500 else ""))
+            print("=" * 80 + "\n")
+            # 需要查看完整检索数据时，可将日志级别设为 DEBUG；此处不输出 raw_text 以免刷屏
+            _detail = {k: v for k, v in merged_data.items() if k not in ("raw_text", "insight_documents", "relationship_documents")}
+            logger.debug("📊 检索数据详情: %s", json.dumps(_detail, ensure_ascii=False, indent=2)[:3000])
             
             return merged_result
             
@@ -1336,6 +1518,55 @@ class NewViewGenerator:
             return await self.data_retriever.retrieve_and_validate_data(
                 requirement, chart_summary, company_name, year
             )
+    
+    def _retrieved_data_summary(self, retrieved_data: Dict[str, Any]) -> str:
+        """生成检索数据的可读摘要，便于在日志中查看（不含 raw_text）。"""
+        labels = retrieved_data.get("labels", [])
+        values = retrieved_data.get("values", [])
+        series = retrieved_data.get("series", [])
+        unit = retrieved_data.get("unit", "")
+        parts = [f"labels={labels[:8]}{'...' if len(labels) > 8 else ''}", f"unit={unit!r}"]
+        if series:
+            parts.append("series=[" + ", ".join(f"{s.get('name', '?')}({len(s.get('values', []))}点)" for s in series[:5]) + ("]..." if len(series) > 5 else "]"))
+        else:
+            parts.append(f"values(len={len(values)})")
+        return " | ".join(parts)
+    
+    def _convert_retrieved_data_units(self, retrieved_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        对检索数据做单位换算，使绘图时数值更易读（如 元/万元 -> 亿元）。
+        返回新字典，不修改入参。换算后写入 display_unit（用于 Y 轴标题）。
+        """
+        out = dict(retrieved_data)
+        unit = (out.get("unit") or "").strip()
+        if not unit:
+            return out
+        scale = 1.0
+        display_unit = unit
+        if "元" in unit and "亿" not in unit and "万" not in unit:
+            scale = 1e-8  # 元 -> 亿元
+            display_unit = "亿元"
+        elif "万元" in unit:
+            scale = 1e-4  # 万元 -> 亿元
+            display_unit = "亿元"
+        elif "亿" in unit:
+            display_unit = "亿元"
+        if scale == 1.0 and unit == display_unit:
+            out["display_unit"] = display_unit
+            return out
+        try:
+            values = out.get("values", [])
+            if values:
+                out["values"] = [float(x) * scale for x in values]
+            for s in out.get("series", []):
+                v = s.get("values", [])
+                if v:
+                    s["values"] = [float(x) * scale for x in v]
+            out["unit"] = display_unit
+            out["display_unit"] = display_unit
+        except (TypeError, ValueError):
+            pass
+        return out
     
     async def _generate_view_with_llm(
         self,
@@ -1353,6 +1584,13 @@ class NewViewGenerator:
                 synthesis_insight=synthesis_insight,  # ⭐传递综合洞察
                 card_analysis=card_analysis  # ⭐传递多视图分析结果
             )
+            
+            # 【调试】打印生成新视图的 prompt
+            print("\n" + "=" * 80)
+            print("[调试] 生成新视图的 Prompt（输入给 LLM）")
+            print("=" * 80)
+            print(prompt[:6000] + ("\n... [已截断]" if len(prompt) > 6000 else ""))
+            print("=" * 80 + "\n")
             
             response = await self._call_llm_for_view(prompt)
             return self._parse_view_response(response, requirement, data_result, chart_summary)
@@ -1791,12 +2029,17 @@ class NewViewGenerator:
                     type="bar"
                 ))
         
-        # 构建ChartLayout
+        # 构建ChartLayout（Y 轴带单位、图例显示）
         layout_data = view_config.get("layout", {})
+        yaxis_title = layout_data.get("yaxis_title", "数值")
+        if yaxis_title == "数值":
+            du = data_result.get("retrieved_data", {}).get("display_unit") or data_result.get("retrieved_data", {}).get("unit")
+            if du:
+                yaxis_title = f"数值({du})"
         layout = ChartLayout(
             title=layout_data.get("title", view_config.get("title", requirement.get("view_description", "综合分析视图"))),
             xaxis_title=layout_data.get("xaxis_title", "维度"),
-            yaxis_title=layout_data.get("yaxis_title", "数值"),
+            yaxis_title=yaxis_title,
             height=layout_data.get("height", 500),
             showlegend=layout_data.get("showlegend", True)
         )
@@ -1806,7 +2049,7 @@ class NewViewGenerator:
         try:
             chart_type = ChartType(chart_type_str)
         except:
-            chart_type = ChartType.bar  # 默认使用bar
+            chart_type = ChartType.BAR  # 默认使用柱状图
         
         chart_config = PlotlyChartConfig(
             chart_type=chart_type,
@@ -1940,25 +2183,28 @@ class NewViewGenerator:
         requirement: Dict[str, Any],
         data_result: Dict[str, Any]
     ) -> VisualizationResponse:
-        """创建降级视图响应（返回VisualizationResponse）"""
-        # 尝试从data_result中提取数据
+        """创建降级视图响应（返回VisualizationResponse）；注意图例与 Y 轴单位。"""
+        # 尝试从data_result中提取数据（已做过单位换算）
         retrieved_data = data_result.get("retrieved_data", {})
         labels = retrieved_data.get("labels", [])
         values = retrieved_data.get("values", [])
         series = retrieved_data.get("series", [])
+        display_unit = retrieved_data.get("display_unit") or retrieved_data.get("unit", "")
+        y_title = f"数值({display_unit})" if display_unit else "数值"
         
         # 如果没有数据，创建空视图
         if not labels and not values and not series:
             labels = ["暂无数据"]
             values = [0]
         
-        # 构建traces
+        # 构建traces（图例使用系列名称）
         traces = []
         if series:
-            # 多系列数据
-            for s in series[:3]:  # 最多3个系列
+            # 多系列数据，每个系列名称作为图例项
+            for s in series[:5]:  # 最多5个系列，保证图例可读
+                name = s.get("name") or "系列"
                 traces.append(ChartTrace(
-                    name=s.get("name", "系列"),
+                    name=name,
                     x=labels if labels else [f"点{i+1}" for i in range(len(s.get("values", [])))],
                     y=s.get("values", []),
                     type="bar"
@@ -1976,11 +2222,12 @@ class NewViewGenerator:
             title=requirement.get('view_description', '综合分析视图') or "综合分析视图",
             height=400,
             xaxis_title="维度",
-            yaxis_title="数值"
+            yaxis_title=y_title,
+            showlegend=True
         )
         
         chart_config = PlotlyChartConfig(
-            chart_type=ChartType.bar,
+            chart_type=ChartType.BAR,
             traces=traces,
             layout=layout
         )

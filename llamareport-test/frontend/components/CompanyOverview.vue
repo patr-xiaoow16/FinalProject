@@ -79,20 +79,6 @@
                 {{ getMetricChangeWithArrow(overviewData.npl_ratio) }}
               </div>
             </div>
-            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.provision_coverage_ratio) }" @click="hasMetricData(overviewData.provision_coverage_ratio) && handleMetricClick('拨备覆盖率', overviewData.provision_coverage_ratio)">
-              <div class="metric-name">拨备覆盖率</div>
-              <div class="metric-value">{{ formatMetricValue(overviewData.provision_coverage_ratio) }}</div>
-              <div v-if="getMetricChange(overviewData.provision_coverage_ratio)" :class="['metric-change', getChangeClassInverted(overviewData.provision_coverage_ratio)]">
-                {{ getMetricChangeWithArrow(overviewData.provision_coverage_ratio) }}
-              </div>
-            </div>
-            <div class="metric-card core-metric" :class="{ clickable: hasMetricData(overviewData.capital_adequacy_ratio) }" @click="hasMetricData(overviewData.capital_adequacy_ratio) && handleMetricClick('资本充足率', overviewData.capital_adequacy_ratio)">
-              <div class="metric-name">资本充足率</div>
-              <div class="metric-value">{{ formatMetricValue(overviewData.capital_adequacy_ratio) }}</div>
-              <div v-if="getMetricChange(overviewData.capital_adequacy_ratio)" :class="['metric-change', getChangeClassInverted(overviewData.capital_adequacy_ratio)]">
-                {{ getMetricChangeWithArrow(overviewData.capital_adequacy_ratio) }}
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -137,9 +123,7 @@ export default {
         this.hasMetricData(this.overviewData.total_assets) ||
         this.hasMetricData(this.overviewData.net_interest_margin) ||
         this.hasMetricData(this.overviewData.cost_income_ratio) ||
-        this.hasMetricData(this.overviewData.npl_ratio) ||
-        this.hasMetricData(this.overviewData.provision_coverage_ratio) ||
-        this.hasMetricData(this.overviewData.capital_adequacy_ratio)
+        this.hasMetricData(this.overviewData.npl_ratio)
       );
     }
   },

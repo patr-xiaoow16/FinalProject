@@ -1389,6 +1389,79 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                 except Exception as e:
                     logger.warning(f"检索表格数据失败: {str(e)}")
             
+            # ========== 趋势数据三步：1.当前年份=上传文件/文档年份 2.先检索「{year}年同比」 3.检索不到再当年+上年公式计算 ==========
+            retrieved_trends = {}  # indicator_key -> (change_rate, change_direction)
+            if year and year.isdigit():
+                logger.info(f"📅 步骤1：当前年份（来自上传文件/文档）: {year}年")
+                try:
+                    trend_query = f"{year}年同比 本年同比增减 同比增减 营业收入 净利润 资产总额 ROE 净息差 成本收入比"
+                    if use_hybrid and rag_engine.hybrid_retriever:
+                        trend_results = rag_engine.hybrid_retriever.retrieve(
+                            trend_query, top_k=25, strategy='table_first',
+                            context_filter=context_filter if context_filter else None
+                        )
+                    else:
+                        retriever = rag_engine.index.as_retriever(similarity_top_k=25)
+                        nodes = retriever.retrieve(trend_query)
+                        trend_results = [{'document': n} for n in nodes]
+                    if trend_results:
+                        trend_context = "\n\n".join([r['document'].text for r in trend_results[:20]])
+                        trend_names = [
+                            ("revenue", ["营业收入", "营业总收入"]),
+                            ("net_profit", ["净利润", "归属于母公司所有者的净利润", "归属于本行股东的净利润"]),
+                            ("total_assets", ["资产总额", "总资产", "资产合计"]),
+                            ("roe", ["加权平均净资产收益率", "ROE", "净资产收益率"]),
+                            ("net_interest_margin", ["净息差"]),
+                            ("cost_income_ratio", ["成本收入比"]),
+                            ("npl_ratio", ["不良率", "不良贷款率"]),
+                        ]
+                        # 不良率/拨备覆盖率/资本充足率：表格中同比列多为「X个百分点」，同行中的 % 常为指标值(如1.06%、250%)，不能当同比
+                        value_like_pct_keys = ("npl_ratio",)  # 不良率约 0.5%~5%，仅接受「个百分点」为同比
+                        for key, names in trend_names:
+                            if key in retrieved_trends:
+                                continue
+                            for line in trend_context.replace('\r', '\n').split('\n'):
+                                if not any(n in line for n in names):
+                                    continue
+                                # 优先匹配「X个百分点」（同比列常见写法）
+                                m_pt = re.search(r'([+\-]?\d+\.?\d*)\s*个百分点', line)
+                                if m_pt:
+                                    try:
+                                        num = float(m_pt.group(1).strip())
+                                        change_rate = f"{num:+.2f}个百分点"
+                                        change_direction = '下降' if num < 0 else ('增长' if num > 0 else '持平')
+                                        retrieved_trends[key] = (change_rate, change_direction)
+                                        logger.info(f"  📈 步骤2 检索到{year}年同比: {key} -> {change_rate}")
+                                        break
+                                    except ValueError:
+                                        pass
+                                if key in retrieved_trends:
+                                    continue
+                                m_pct = re.search(r'[(\（]?([+\-]?\d+\.?\d*)\s*%[)\）]?', line)
+                                if m_pct:
+                                    g = m_pct.group(1)
+                                    if g:
+                                        try:
+                                            num = float(g.strip())
+                                            # 不良率：同行 % 多为指标值(1.06%等)，不作为同比，避免误用
+                                            if key in value_like_pct_keys and 0.3 <= abs(num) <= 6:
+                                                continue
+                                            change_rate = f"{num:+.1f}%"
+                                            change_direction = '下降' if num < 0 else ('增长' if num > 0 else '持平')
+                                            retrieved_trends[key] = (change_rate, change_direction)
+                                            logger.info(f"  📈 步骤2 检索到{year}年同比: {key} -> {change_rate}")
+                                            break
+                                        except ValueError:
+                                            pass
+                        if retrieved_trends:
+                            logger.info(f"✅ 步骤2：共检索到 {len(retrieved_trends)} 个指标的{year}年同比")
+                        else:
+                            logger.info(f"⚠️ 步骤2：未解析出{year}年同比，步骤3将用当年+上年数据公式计算趋势")
+                    else:
+                        logger.info(f"⚠️ 步骤2：未检索到{year}年同比内容，步骤3将用当年+上年数据公式计算趋势")
+                except Exception as e:
+                    logger.warning(f"检索{year}年同比失败: {e}")
+            
             # 构建一次性提取所有指标的提示词
             year_emphasis = f"{year}年" if year else "最新年度"
             extract_prompt = f"""请从以下检索到的文档内容中提取关键财务指标的具体数值。
@@ -1521,6 +1594,12 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                         if filled >= 6:
                             use_llm_snapshot = True
                             logger.info(f"✅ LLM 结构化 JSON 提取成功，共 {filled} 个指标，趋势已全部由当年/上年数值计算")
+                            # 步骤2已检索到「{year}年同比」时，优先用检索到的趋势覆盖 LLM 计算值，保证前端与检索一致
+                            for tk, (tr, td) in retrieved_trends.items():
+                                if snapshot_dict.get(tk) and isinstance(snapshot_dict[tk], dict):
+                                    snapshot_dict[tk]["change_rate"] = tr
+                                    snapshot_dict[tk]["change_direction"] = td
+                                    logger.info(f"  📈 已用步骤2检索同比覆盖: {tk} -> {tr}")
                 except Exception as e:
                     logger.warning(f"LLM 结构化 JSON 提取失败: {str(e)}，将使用正则提取")
             
@@ -1593,28 +1672,38 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                             # 如果有年份，优先选择年份列的数据
                             best_match = None
                             if year:
-                                # 查找表格格式：| 指标名 | 2024年 | 2023年 |
-                                # 或者：指标名 | 数值(2024年) | 数值(2023年)
+                                prev_year_str = str(int(year) - 1)
+                                # 查找表格格式：| 指标名 | 2024年 | 2023年 | 或 | 2023年 | 2024年 |
+                                # 优先选「紧挨当年列」的数值，避免把上年列当成本年
                                 for match in matches:
-                                    # 检查匹配位置附近是否有年份
-                                    start = max(0, match.start() - 200)
-                                    end = min(len(all_context_text), match.end() + 200)
-                                    context_around = all_context_text[start:end]
-                                    
-                                    # 检查是否在年份列中（表格格式）
-                                    # 查找年份列的模式：| 2024年 | 数值 | 或 | 2024 | 数值 |
-                                    year_in_context = f"{year}年" in context_around or str(year) in context_around
-                                    
-                                    # 检查是否在正确的年份列（通过查找表格结构）
-                                    # 如果匹配值前面有年份，说明是正确的列
                                     match_start = match.start()
-                                    before_match = all_context_text[max(0, match_start-50):match_start]
-                                    
-                                    # 检查表格行：| 指标 | 2024年 | 数值 |
-                                    if year_in_context or (str(year) in before_match and '|' in before_match):
+                                    before_match = all_context_text[max(0, match_start - 35):match_start]
+                                    # 要求：数值紧前方是当年列（如 "| 2024年 |" 或 "2024年 |"），而不是上年
+                                    is_after_current_year = (
+                                        re.search(rf'\|\s*{re.escape(year)}年?\s*\|', before_match) is not None
+                                        or re.search(rf'{re.escape(year)}年?\s*\|', before_match) is not None
+                                    )
+                                    # 排除：数值紧前方是上年列（则说明这是上年数据）
+                                    is_after_prev_year = (
+                                        re.search(rf'\|\s*{re.escape(prev_year_str)}年?\s*\|', before_match) is not None
+                                        or re.search(rf'{re.escape(prev_year_str)}年?\s*\|', before_match) is not None
+                                    )
+                                    if is_after_current_year and not is_after_prev_year:
                                         best_match = match
-                                        logger.info(f"  ✅ 找到{year}年的数据: {key}")
+                                        logger.info(f"  ✅ 找到{year}年列的数据: {key}")
                                         break
+                                if not best_match:
+                                    for match in matches:
+                                        start = max(0, match.start() - 200)
+                                        end = min(len(all_context_text), match.end() + 200)
+                                        context_around = all_context_text[start:end]
+                                        year_in_context = f"{year}年" in context_around or str(year) in context_around
+                                        match_start = match.start()
+                                        before_match = all_context_text[max(0, match_start - 50):match_start]
+                                        if year_in_context or (str(year) in before_match and '|' in before_match):
+                                            best_match = match
+                                            logger.info(f"  ✅ 找到{year}年的数据: {key}")
+                                            break
                             
                             if not best_match:
                                 best_match = matches[0]  # 使用第一个匹配
@@ -1625,49 +1714,65 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                             if key in pct_keys and not value.endswith('%'):
                                 value = value + '%'
                             
-                            # 提取同比增减数据（在匹配位置附近查找）
+                            # 趋势：优先用步骤2检索到的「{year}年同比」；否则同行同比；否则步骤3当年+上年公式计算
                             change_rate = None
                             change_direction = None
+                            if key in retrieved_trends:
+                                change_rate, change_direction = retrieved_trends[key]
                             match_start = best_match.start()
                             match_end = best_match.end()
-                            # 在匹配位置后查找同比增减（通常在表格的下一列）
                             after_match = all_context_text[match_end:match_end+200]
                             
-                            # 查找同比增减模式（在表格的"本年同比增减"列中）
-                            # 查找表格格式：| 指标 | 2024年 | 2023年 | 同比增减 |
-                            change_patterns = [
-                                r'([\+\-]?\d+\.?\d*%?)',  # 如 +10.9%、-5.2%
-                                r'\(([\+\-]?\d+\.?\d*%?)\)',  # 如 (10.9%)、(-5.2%)
-                                r'([\+\-]?\d+\.?\d*)\s*个百分点',  # 如 -1.30个百分点
-                                r'(增长|下降|持平)',  # 文字描述
-                            ]
-                            
-                            for change_pattern in change_patterns:
-                                change_match = re.search(change_pattern, after_match)
-                                if change_match:
-                                    change_text = change_match.group(1).strip()
-                                    # 判断是变化率还是方向
-                                    if any(c in change_text for c in ['+', '-', '%', '百分点']):
-                                        change_rate = change_text
-                                        # 根据正负号判断方向
-                                        if change_text.startswith('+') or ('%' in change_text and not change_text.startswith('-')):
-                                            change_direction = '增长'
-                                        elif change_text.startswith('-') or ('-' in change_text):
-                                            change_direction = '下降'
-                                        else:
-                                            change_direction = '持平'
-                                    elif change_text in ['增长', '下降', '持平']:
-                                        change_direction = change_text
-                                    if change_rate or change_direction:
-                                        break
-                            
-                            # 核心指标趋势：先使用检索到的同比；若无则用当年/上年数值公式计算
                             if change_rate is None and change_direction is None:
-                                prev_num_match = re.search(r'[\s|]*([\d,\.]+)\s*[%万千百十亿]?', after_match)
-                                if prev_num_match:
-                                    prev_value_str = prev_num_match.group(1).strip().replace(',', '').replace('，', '')
+                                # 查找同比增减模式（在表格的"本年同比增减"列中）
+                                # 查找表格格式：| 指标 | 2024年 | 2023年 | 同比增减 |
+                                change_patterns = [
+                                    r'([\+\-]?\d+\.?\d*%?)',  # 如 +10.9%、-5.2%
+                                    r'\(([\+\-]?\d+\.?\d*%?)\)',  # 如 (10.9%)、(-5.2%)
+                                    r'([\+\-]?\d+\.?\d*)\s*个百分点',  # 如 -1.30个百分点
+                                    r'(增长|下降|持平)',  # 文字描述
+                                ]
+                                for change_pattern in change_patterns:
+                                    change_match = re.search(change_pattern, after_match)
+                                    if change_match:
+                                        change_text = change_match.group(1).strip()
+                                        if any(c in change_text for c in ['+', '-', '%', '百分点']):
+                                            change_rate = change_text
+                                            if change_text.startswith('+') or ('%' in change_text and not change_text.startswith('-')):
+                                                change_direction = '增长'
+                                            elif change_text.startswith('-') or ('-' in change_text):
+                                                change_direction = '下降'
+                                            else:
+                                                change_direction = '持平'
+                                        elif change_text in ['增长', '下降', '持平']:
+                                            change_direction = change_text
+                                        if change_rate or change_direction:
+                                            break
+                                # 步骤3：仍无趋势则用当年+上年数值公式计算
+                                if change_rate is None and change_direction is None:
+                                    # 取 after_match 中「上年」列数值，需排除同比列（如 -3.5%、+10.9%）
+                                    prev_num = None
+                                    for num_match in re.finditer(r'[\s|]*([-+]?\d+[,，]?\d*\.?\d*)\s*([%万千百十亿]?)', after_match):
+                                        prev_value_str = num_match.group(1).strip().replace(',', '').replace('，', '')
+                                        unit_suffix = (num_match.group(2) or '').strip()
+                                        n = _parse_metric_value(prev_value_str) if prev_value_str else None
+                                        if n is None:
+                                            continue
+                                        amount_keys = ["revenue", "net_profit", "total_assets"]
+                                        if key in amount_keys:
+                                            if n > 10 and (unit_suffix in ('万', '亿', '元', '') or not unit_suffix):
+                                                prev_num = n
+                                                break
+                                            if unit_suffix in ('万', '亿', '元') and n > 0:
+                                                prev_num = n
+                                                break
+                                        else:
+                                            if unit_suffix == '%' and -50 <= n <= 50 and n != 0:
+                                                continue
+                                            if abs(n) > 1e-9:
+                                                prev_num = n
+                                                break
                                     cur_num = _parse_metric_value(value)
-                                    prev_num = _parse_metric_value(prev_value_str) if prev_value_str else None
                                     if cur_num is not None and prev_num is not None and abs(prev_num) > 1e-9:
                                         amount_keys = ["revenue", "net_profit", "total_assets"]
                                         if key in amount_keys:
@@ -1684,7 +1789,7 @@ async def get_quick_overview(request: Optional[QuickOverviewRequest] = None):
                                                 change_rate = f"{diff:+.2f}个百分点" if abs(prev_num) > 1 else f"{(cur_num - prev_num) / prev_num * 100:+.1f}%"
                                                 change_direction = '增长' if cur_num >= prev_num else '下降'
                                         if change_rate:
-                                            logger.info(f"  📐 趋势公式计算: {key} change_rate={change_rate}")
+                                            logger.info(f"  📐 步骤3 趋势公式计算: {key} cur={cur_num} prev={prev_num} change_rate={change_rate}")
                             
                         regex_extracted[key] = {
                             "name": {

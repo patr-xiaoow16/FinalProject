@@ -149,11 +149,17 @@ class VisualizationAgent:
                             question_type=question_type
                         )
                     
-                    # 生成洞察
-                    dataset_insights = await self._generate_insights(
+                    # 用 LLM 生成一句话洞察（15–25 字），不展示极值分析
+                    dataset_insights = await self._generate_insight_llm(
                         dataset,
-                        dataset_recommendation.recommended_chart_type
+                        dataset_recommendation.recommended_chart_type,
+                        query
                     )
+                    if not dataset_insights:
+                        dataset_insights = await self._generate_insights(
+                            dataset,
+                            dataset_recommendation.recommended_chart_type
+                        )
                     
                     # 创建单个视图
                     single_viz = SingleVisualization(
@@ -184,14 +190,13 @@ class VisualizationAgent:
                     confidence_score=0.85
                 )
             
-            # 单个数据集处理（向后兼容原有逻辑）
-            # 4. 推荐图表类型（增强版：同时考量问题和回答）
-            recommendation = await self._recommend_chart_type(
-                query, 
-                extracted_data,
-                answer=answer,  # 传入回答内容
-                question_type=question_type
-            )
+            # 单个数据集处理：视图类型与洞察均用 LLM 生成
+            # 4. 根据数据用 LLM 选择可视化视图类型，失败则回退到规则推荐
+            recommendation = await self._recommend_chart_type_by_llm(query, extracted_data)
+            if recommendation is None:
+                recommendation = await self._recommend_chart_type(
+                    query, extracted_data, answer=answer, question_type=question_type
+                )
             
             # 5. 检查是否需要生成时间轴
             timeline_data = None
@@ -237,11 +242,17 @@ class VisualizationAgent:
                 chart_config = None
                 logger.info(f"✅ {visualization_type}类型，chart_config已设置为None，避免渲染Plotly图表")
             
-            # 7. 生成洞察
-            insights = await self._generate_insights(
+            # 7. 用 LLM 生成一句话洞察（15–25 字），不展示极值分析
+            insights = await self._generate_insight_llm(
                 extracted_data,
-                recommendation.recommended_chart_type
+                recommendation.recommended_chart_type,
+                query
             )
+            if not insights:
+                insights = await self._generate_insights(
+                    extracted_data,
+                    recommendation.recommended_chart_type
+                )
             
             logger.info(f"✅ 可视化生成成功: {visualization_type} (推荐类型: {recommendation.recommended_chart_type.value})")
             
@@ -2021,68 +2032,116 @@ links: source=[0,0,0,1,2,3], target=[1,2,3,4,4,4], value=[60,30,10,40,20,5]
 
         return title
 
+    async def _recommend_chart_type_by_llm(
+        self,
+        query: str,
+        data: Dict[str, Any]
+    ) -> Optional[ChartRecommendation]:
+        """
+        根据数据用 LLM 选择可视化视图类型。
+        失败时返回 None，调用方回退到规则推荐。
+        """
+        try:
+            labels = data.get('labels', []) or []
+            values = data.get('values', []) or []
+            data_type = data.get('data_type', "unknown")
+            series = data.get('series', [])
+            data_summary = (
+                f"数据维度: {data_type}, 数据点数: {len(values)}, "
+                f"标签示例: {labels[:5] if labels else '无'}, 数值示例: {values[:5] if values else '无'}"
+            )
+            if series:
+                data_summary += f", 系列数: {len(series)}"
+            prompt = f"""根据以下数据特征，选择最合适的一种可视化图表类型。只返回一个英文类型名。
+
+可选类型：line（折线图/趋势）, bar（柱状图）, pie（饼图）, area（面积图）, gauge（仪表盘）, multi_line（多折线）, grouped_bar（分组柱状图）, table（表格）, scatter（散点图）, heatmap（热力图）
+
+用户问题：{query[:200]}
+{data_summary}
+
+只返回一个类型英文名，不要解释："""
+            resp = await self.llm.acomplete(prompt)
+            raw = getattr(resp, 'text', None) or str(resp)
+            raw = raw.strip().lower()
+            type_map = {
+                "line": ChartType.LINE, "bar": ChartType.BAR, "pie": ChartType.PIE,
+                "area": ChartType.AREA, "gauge": ChartType.GAUGE, "multi_line": ChartType.MULTI_LINE,
+                "grouped_bar": ChartType.GROUPED_BAR, "table": ChartType.TABLE,
+                "scatter": ChartType.SCATTER, "heatmap": ChartType.HEATMAP,
+            }
+            for k, ct in type_map.items():
+                if k in raw or raw == k:
+                    return ChartRecommendation(
+                        recommended_chart_type=ct,
+                        reason="根据数据由大模型选择的视图类型",
+                        data_characteristics=data_summary,
+                        alternative_charts=[ChartType.LINE, ChartType.BAR]
+                    )
+            return None
+        except Exception as e:
+            logger.warning(f"LLM 图表类型推荐失败: {e}")
+            return None
+
+    async def _generate_insight_llm(
+        self,
+        data: Dict[str, Any],
+        chart_type: ChartType,
+        query: str
+    ) -> List[VisualizationInsight]:
+        """
+        用 LLM 对数据生成数据洞察，80–100 字，要有数据支撑并尽可能分析原因。
+        """
+        try:
+            labels = data.get('labels', []) or []
+            values = data.get('values', []) or []
+            if not values:
+                return []
+            # 构造完整数据摘要供 LLM 引用
+            if len(labels) <= 8:
+                data_str = "；".join([f"{l}为{v}" for l, v in zip(labels, values)])
+            else:
+                head = "；".join([f"{l}为{v}" for l, v in list(zip(labels, values))[:4]])
+                tail = "；".join([f"{l}为{v}" for l, v in list(zip(labels, values))[-4:]])
+                data_str = f"前段: {head} … 后段: {tail}（共{len(values)}个数据点）"
+            prompt = f"""根据以下图表数据，写一段数据洞察（仅中文，80–100 字）。要求：
+1. 必须引用具体数据（如某年/某指标数值）作为支撑；
+2. 尽可能分析变化或差异的原因（如市场、政策、业务等）；
+3. 表述清晰、连贯，不要罗列极值或“最大值/最小值”式句子。
+
+数据：{data_str}
+用户问题：{query[:200]}
+
+只输出这段洞察正文，80–100 字，不要标题、不要解释："""
+            resp = await self.llm.acomplete(prompt)
+            text = getattr(resp, 'text', None) or str(resp)
+            text = text.strip()
+            # 不截断，保证前端展示完整洞察；仅做过长时的安全截断（如模型超长输出）
+            if len(text) > 200:
+                text = text[:197].rstrip("，。、") + "…"
+            if not text:
+                return []
+            return [
+                VisualizationInsight(
+                    insight_type="trend",
+                    description=text,
+                    key_findings=[]
+                )
+            ]
+        except Exception as e:
+            logger.warning(f"LLM 洞察生成失败: {e}")
+            return []
+
     async def _generate_insights(
         self,
         data: Dict[str, Any],
         chart_type: ChartType
     ) -> List[VisualizationInsight]:
         """
-        生成可视化洞察
-
-        Args:
-            data: 数据
-            chart_type: 图表类型
-
-        Returns:
-            List[VisualizationInsight]: 洞察列表
+        生成可视化洞察（已改为优先使用 LLM 生成 80–100 字数据洞察，不再包含极值分析）
         """
         try:
-            insights = []
-            values = data.get('values', [])
-            labels = data.get('labels', [])
-
-            if not values:
-                return insights
-
-            # 趋势洞察
-            if len(values) >= 2:
-                if values[-1] > values[0]:
-                    trend = "上升"
-                    change = ((values[-1] - values[0]) / values[0]) * 100
-                elif values[-1] < values[0]:
-                    trend = "下降"
-                    change = ((values[0] - values[-1]) / values[0]) * 100
-                else:
-                    trend = "持平"
-                    change = 0
-
-                insights.append(VisualizationInsight(
-                    insight_type="trend",
-                    description=f"整体呈现{trend}趋势",
-                    key_findings=[
-                        f"从{labels[0] if labels else '起始'}到{labels[-1] if labels else '结束'}，变化幅度为{change:.1f}%"
-                    ]
-                ))
-
-            # 极值洞察
-            if len(values) > 0:
-                max_val = max(values)
-                min_val = min(values)
-                max_idx = values.index(max_val)
-                min_idx = values.index(min_val)
-
-                insights.append(VisualizationInsight(
-                    insight_type="comparison",
-                    description="极值分析",
-                    key_findings=[
-                        f"最大值: {max_val} ({labels[max_idx] if labels and max_idx < len(labels) else ''})",
-                        f"最小值: {min_val} ({labels[min_idx] if labels and min_idx < len(labels) else ''})",
-                        f"差值: {max_val - min_val}"
-                    ]
-                ))
-
-            return insights
-
+            # 由 LLM 生成 80–100 字数据洞察，在 generate_visualization 中调用 _generate_insight_llm
+            return []
         except Exception as e:
             logger.error(f"生成洞察失败: {str(e)}")
             return []

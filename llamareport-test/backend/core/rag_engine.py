@@ -544,13 +544,14 @@ class RAGEngine:
             logger.error(f"表格转文本失败: {str(e)}")
             return f"表格 {table.get('table_id', 'unknown')} (转换失败: {str(e)})"
     
-    def query(self, question: str, context_filter: Optional[Dict] = None) -> Dict[str, Any]:
+    def query(self, question: str, context_filter: Optional[Dict] = None, top_k: int = 10) -> Dict[str, Any]:
         """
         查询RAG系统
 
         Args:
             question: 查询问题
             context_filter: 上下文过滤器（可选）
+            top_k: 返回的文档数量，默认10；视图联动等数据检索场景可传 25–30 以优先拿到更多表格
 
         Returns:
             查询结果
@@ -616,8 +617,8 @@ class RAGEngine:
                 print("🔍 使用Hybrid Retriever执行混合检索...")
                 if context_filter:
                     print(f"🔍 应用上下文过滤器: {context_filter}")
-                # 使用Hybrid Retriever进行检索，传递context_filter
-                hybrid_results = self.hybrid_retriever.retrieve(question, top_k=10, context_filter=context_filter)
+                # 使用Hybrid Retriever进行检索：先表格后PDF，传递 context_filter 与 top_k
+                hybrid_results = self.hybrid_retriever.retrieve(question, top_k=top_k, context_filter=context_filter)
                 
                 if hybrid_results:
                     print(f"📊 Hybrid Retriever检索结果:")
@@ -628,26 +629,47 @@ class RAGEngine:
                     # 显示检索到的文档来源（用于调试）
                     if hybrid_results:
                         print(f"  - 文档来源:")
-                        for i, result in enumerate(hybrid_results[:3], 1):
+                        for i, result in enumerate(hybrid_results[:5], 1):
                             metadata = result['document'].metadata
                             filename = metadata.get('filename') or metadata.get('source_file', 'unknown')
-                            print(f"      {i}. {filename}")
+                            is_table = metadata.get('channel') == 'table_index' or metadata.get('document_type') == 'table_data'
+                            tag = "表格" if is_table else "文本"
+                            print(f"      {i}. [{tag}] {filename}")
                     
-                    # 构建上下文（使用过滤后的结果）
-                    context = "\n\n".join([r['document'].text for r in hybrid_results])
+                    # 构建上下文：先全部表格数据，再 PDF/文本，并分段标注以便 LLM 优先依据表格
+                    table_parts = []
+                    text_parts = []
+                    for r in hybrid_results:
+                        doc = r['document']
+                        is_table = (
+                            doc.metadata.get('channel') == 'table_index'
+                            or doc.metadata.get('document_type') == 'table_data'
+                            or doc.metadata.get('is_financial', False)
+                        )
+                        if is_table:
+                            table_parts.append(doc.text)
+                        else:
+                            text_parts.append(doc.text)
+                    if table_parts and text_parts:
+                        context = "【以下为上传的表格数据，请优先依据表格中的数值作答】\n\n" + "\n\n".join(table_parts)
+                        context += "\n\n【以下为PDF/文本，作补充参考】\n\n" + "\n\n".join(text_parts)
+                    elif table_parts:
+                        context = "【以下为上传的表格数据，请依据表格中的数值作答】\n\n" + "\n\n".join(table_parts)
+                    else:
+                        context = "\n\n".join(text_parts)
                     
                     # 使用过滤后的上下文直接生成回答，而不是重新查询
                     # 这样可以确保只使用过滤后的文档
                     from llama_index.core import Settings
                     from llama_index.core.llms import ChatMessage
                     
-                    # 构建包含过滤后上下文的提示词
+                    # 构建包含过滤后上下文的提示词（先表格后 PDF，并强调优先依据表格）
                     context_prompt = f"""{enhanced_query}
 
-【检索到的文档内容】
+【检索到的文档内容】（先表格后 PDF，请优先依据表格中的数值作答）
 {context}
 
-请基于以上检索到的文档内容回答问题。如果文档内容中没有相关信息，请明确说明。"""
+请基于以上检索到的文档内容回答问题。**请优先依据【表格数据】部分的数值**，PDF 文本仅作补充；若涉及金额或指标，以表格数据为准。如果文档内容中没有相关信息，请明确说明。"""
                     
                     # 使用LLM直接生成回答（同步方式）
                     llm = Settings.llm

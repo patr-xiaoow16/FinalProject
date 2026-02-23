@@ -1238,7 +1238,9 @@ export default {
         '成本收入比', '净息差', '不良贷款率', '拨备覆盖率',
         'EPS', '每股收益', '每股净资产', '分红率'
       ]
-      metricKeywords.forEach((keyword) => {
+      // 先替换更长短语，避免「利息净收入」抢先匹配掉「非利息净收入」里的后半段
+      const sortedKeywords = [...metricKeywords].sort((a, b) => b.length - a.length)
+      sortedKeywords.forEach((keyword) => {
         result = result.replaceAll(keyword, `<span class="insight-key">${keyword}</span>`)
       })
       result = result.replace(/(-?\d{4,}(?:\.\d+)?%?|-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?|-?\d{1,3}(?:\.\d+)?%?)(万亿元|亿元|万元|元)?/g, (match) => {
@@ -2397,6 +2399,24 @@ export default {
   border-bottom: none;
   margin-bottom: 0;
   padding-bottom: 0;
+}
+
+/* 数据洞察完整展示：不截断，自动换行，展示 80–100 字完整内容 */
+.data-insight-item .insight-text,
+.insights-box .insight-item h4,
+.insights-box .insight-item h4 span {
+  white-space: normal;
+  word-break: normal;
+  overflow: visible;
+  max-height: none;
+}
+.data-insight-item .insight-text {
+  display: block;
+  line-height: 1.5;
+}
+.insights-box .insight-item h4 {
+  flex-wrap: wrap;
+  line-height: 1.5;
 }
 
 .insight-findings-list {
