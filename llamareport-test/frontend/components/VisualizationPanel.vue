@@ -2,15 +2,15 @@
   <Card title="可视化视图" icon="📊" :status="status" empty-text="暂无可视化数据">
     <template #default>
       <div class="visualization-panel-container">
-        <!-- 浮动操作栏（当有卡片被选中时显示） -->
-        <div v-if="selectedCards.length > 0" class="floating-action-bar" :style="{ display: 'block' }">
+        <!-- 浮动操作栏（当有卡片被选中时显示，包括仅选中杜邦分析） -->
+        <div v-if="selectedViewsCount > 0" class="floating-action-bar" :style="{ display: 'block' }">
           <div class="action-bar-content">
             <!-- 第一行：选中卡片信息和生成按钮（右上角） -->
             <div class="action-bar-row-top">
               <div class="selected-cards-info">
                 <div class="selected-badge">
                   <span class="selected-icon">✓</span>
-                  <span class="selected-count-text">{{ selectedCards.length }}</span>
+                  <span class="selected-count-text">{{ selectedViewsCount }}</span>
                 </div>
                 <span class="selected-label">个视图已选中</span>
                 <button class="clear-selection-btn" @click="clearSelection" title="清除选择">
@@ -75,13 +75,13 @@
           <div 
             v-if="dupontData && (dupontData.full_data || dupontData.roe)" 
             class="viz-card dupont-card"
-            :class="{ 'selected': isDupontCardSelected }"
+            :class="{ 'selected': isDupontCardSelectedDisplay }"
             @click="handleDupontCardClick($event)"
           >
             <div class="viz-card-header">
               <div class="viz-card-title">
                 <!-- 选中标记（直接选择模式） -->
-                <span v-if="isDupontCardSelected" class="selection-checkbox checked">
+                <span v-if="isDupontCardSelectedDisplay" class="selection-checkbox checked">
                   ✓
                 </span>
                 <span class="viz-card-icon">📊</span>
@@ -533,7 +533,8 @@ export default {
   data() {
     return {
       selectedCards: [],
-      selectedDupontCard: false,  // ⭐新增：杜邦分析卡片是否被选中
+      selectedDupontCard: false,  // 杜邦分析卡片是否被选中
+      dupontCardSelectionUnlocked: false,  // 仅当用户点击过该卡片后才允许显示选中样式，避免一生成就选中
       generatingAnalysis: false,
       selectedDupontYear: null,
       explorationQuestion: '',  // 探索问题
@@ -544,6 +545,16 @@ export default {
     // 是否有联动生成的卡片
     hasLinkageCards() {
       return this.visualizationCards.some(card => card.isLinkageGenerated)
+    },
+    // 选中的视图数量（普通卡片 + 杜邦卡片若被选中则 +1）
+    selectedViewsCount() {
+      const cardCount = this.selectedCards.length
+      const dupontCount = this.selectedDupontCard ? 1 : 0
+      return cardCount + dupontCount
+    },
+    // 杜邦卡片是否显示为选中（用 computed 保证蓝色边框/勾选随点击响应更新）
+    isDupontCardSelectedDisplay() {
+      return this.selectedDupontCard && this.dupontCardSelectionUnlocked
     },
     status() {
       if (this.loading) return 'loading';
@@ -669,21 +680,6 @@ export default {
       }
       const year = this.selectedDupontYear || this.dupontData.full_data?.report_year || this.dupontYears[0];
       return this.buildDupontTreeFromMetrics(metrics, year);
-    }
-  },
-  watch: {
-    dupontData: {
-      immediate: true,
-      handler() {
-        if (this.dupontYears.length > 0) {
-          const preferredYear = Number(this.dupontData?.full_data?.report_year);
-          if (preferredYear && this.dupontYears.includes(preferredYear)) {
-            this.selectedDupontYear = preferredYear;
-          } else {
-            this.selectedDupontYear = this.dupontYears[0];
-          }
-        }
-      }
     }
   },
   methods: {
@@ -854,6 +850,20 @@ export default {
     removeDupontCard() {
       // 删除杜邦分析卡片：从cards中删除，并清空dupontData
       this.$emit('remove-dupont-card');
+    },
+    /** 重新渲染所有图表卡片（用于杜邦卡片出现导致 DOM 重排后，之前视图的图表容器被重建的情况） */
+    rerenderAllChartCards() {
+      const cards = this.displayCards || [];
+      if (cards.length === 0) return;
+      setTimeout(() => {
+        cards.forEach(card => {
+          if (!card.data || !card.data.has_visualization || card.type !== 'chart') return;
+          const vizType = card.data.visualization_type || 'plotly';
+          if (vizType === 'plotly' && card.data.chart_config) {
+            this.renderChart(card.id, card.data);
+          }
+        });
+      }, 250);
     },
     isCardInList(chartData) {
       // 检查当前chartData是否已经在cards列表中
@@ -1293,11 +1303,9 @@ export default {
       )) {
         return
       }
-      
-      // 切换杜邦分析卡片的选择状态
+      // 用户点击后才允许显示选中/未选中状态（可正常切换）
+      this.dupontCardSelectionUnlocked = true
       this.selectedDupontCard = !this.selectedDupontCard
-      
-      // 更新推荐问题
       this.updateRecommendedQuestions()
     },
     clearSelection() {
@@ -1389,7 +1397,6 @@ export default {
     isCardSelected(cardId) {
       return this.selectedCards.includes(cardId)
     },
-    // ⭐新增：检查杜邦分析卡片是否被选中
     isDupontCardSelected() {
       return this.selectedDupontCard
     },
@@ -1448,6 +1455,11 @@ export default {
   mounted() {
     // 监听重置选择事件
     window.addEventListener('reset-viz-selection', this.resetSelection)
+    // 杜邦数据已存在时（如从父组件传入），强制不显示为选中，必须点击后才选中
+    if (this.dupontData && (this.dupontData.full_data || this.dupontData.roe)) {
+      this.selectedDupontCard = false
+      this.dupontCardSelectionUnlocked = false
+    }
   },
   beforeUnmount() {
     // 清理事件监听
@@ -1504,10 +1516,26 @@ export default {
       immediate: true  // 立即执行一次
     },
     dupontData: {
+      immediate: true,
+      deep: true,
       handler() {
-        // 杜邦分析使用树状视图组件，不需要渲染 Plotly 图表
-      },
-      deep: true
+        this.selectedDupontCard = false;
+        // 新数据到达：不允许显示选中样式，直到用户点击卡片（避免一生成就选中，且点击后可正常选中/取消）
+        this.dupontCardSelectionUnlocked = false;
+        if (this.dupontYears.length > 0) {
+          const preferredYear = Number(this.dupontData?.full_data?.report_year);
+          if (preferredYear && this.dupontYears.includes(preferredYear)) {
+            this.selectedDupontYear = preferredYear;
+          } else {
+            this.selectedDupontYear = this.dupontYears[0];
+          }
+        }
+        this.$nextTick(() => {
+          this.rerenderAllChartCards();
+          this.selectedDupontCard = false;
+          this.dupontCardSelectionUnlocked = false; // 再次确保新数据到达后不显示选中，必须点击才选中
+        });
+      }
     }
   }
 }
@@ -1603,6 +1631,13 @@ export default {
   font-weight: bold;
   z-index: 10;
   font-size: 14px;
+}
+
+/* 杜邦卡片选中态（与普通 viz-card 一致，确保蓝色边框与勾选随点击更新） */
+.viz-card.dupont-card.selected {
+  border: 2px solid #0284c7;
+  background: #f0f9ff;
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.2);
 }
 
 /* 联动生成的卡片样式 */
