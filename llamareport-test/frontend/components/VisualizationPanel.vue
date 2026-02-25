@@ -982,14 +982,24 @@ export default {
               title: chartConfig.layout.yaxis_title || '', 
               gridcolor: '#e0e0e0' 
             },
-            height: 280,  // 固定高度，适配卡片
+            height: 320,
             template: chartConfig.layout.template || 'plotly_white',
             hovermode: chartConfig.layout.hovermode || 'closest',
             showlegend: chartConfig.layout.showlegend !== false,
-            margin: { t: 40, r: 20, b: 50, l: 50 },  // 缩小边距，左右贴合
+            legend: chartConfig.layout.showlegend !== false ? {
+              orientation: 'h',
+              y: -0.42,
+              yanchor: 'top',
+              x: 0.5,
+              xanchor: 'center',
+              font: { size: 10 },
+              itemwidth: 18,
+              traceorder: 'normal'
+            } : undefined,
+            margin: { t: 40, r: 20, b: 118, l: 50 },  // 底部大边距：先横轴再图例，彻底避免遮挡
             paper_bgcolor: 'rgba(0,0,0,0)',
             plot_bgcolor: 'rgba(0,0,0,0)',
-            autosize: true  // 自动调整大小
+            autosize: true
           };
           const config = { 
             responsive: true, 
@@ -1054,9 +1064,9 @@ export default {
             text: chartConfig.layout.title || '桑基图',
             font: { size: 13, color: '#333' }
           },
-          height: 280,  // 减小高度以适配视图卡片（与普通图表一致）
-          font: { size: 10 },  // 进一步减小字体大小
-          margin: { t: 45, r: 15, b: 15, l: 15 },  // 减小边距
+          height: 300,
+          font: { size: 10 },
+          margin: { t: 45, r: 15, b: 15, l: 15 },
           paper_bgcolor: 'rgba(0,0,0,0)',
           plot_bgcolor: 'rgba(0,0,0,0)',
           autosize: true  // 自动调整大小
@@ -1135,9 +1145,18 @@ export default {
             x: 0.5,
             xanchor: 'center'
           },
-          height: 350,  // 减小高度，适配卡片
-          margin: { t: 50, r: 50, b: 50, l: 50 },  // 减小边距
+          height: 360,
+          margin: { t: 50, r: 50, b: 118, l: 50 },  // 底部大边距：横轴 + 图例，彻底避免遮挡
           showlegend: layout.showlegend !== false,
+          legend: layout.showlegend !== false ? {
+            orientation: 'h',
+            y: -0.35,
+            yanchor: 'top',
+            x: 0.5,
+            xanchor: 'center',
+            font: { size: 10 },
+            itemwidth: 18
+          } : undefined,
           template: layout.template || 'plotly_white',
           paper_bgcolor: 'rgba(0,0,0,0)',
           plot_bgcolor: 'rgba(0,0,0,0)'

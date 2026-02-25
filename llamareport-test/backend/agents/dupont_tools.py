@@ -22,6 +22,92 @@ if str(parent_root) not in sys.path:
 logger = logging.getLogger(__name__)
 
 
+def _retrieve_context_by_year(
+    retriever,
+    company_name: str,
+    years_to_fetch: List[int],
+    filename: Optional[str] = None,
+    max_chunks_per_year: int = 8,
+) -> Dict[int, str]:
+    """
+    按年份分别检索杜邦相关上下文，减少不同年份数据混用。
+    每年使用带年份/本期/上年的查询，并过滤节点文本中需包含该年或对应关键词。
+    返回: { year: "该年相关文本" }
+    """
+    if not retriever or not years_to_fetch:
+        return {}
+
+    # 每年一组查询，强调该年或本期/上年
+    year_queries: Dict[int, List[str]] = {}
+    for y in years_to_fetch:
+        year_str = str(y)
+        year_queries[y] = [
+            f"{company_name} {year_str}年 利润表 净利润 营业收入",
+            f"{company_name} {year_str}年 资产负债表 总资产 股东权益",
+            f"{company_name} {year_str}年 加权平均净资产收益率 ROE 总资产收益率 ROA",
+            f"{company_name} {year_str}年 营业净利润率 资产周转率 权益乘数",
+        ]
+    # 主年（通常为最大年）增加“本期/本年”查询，上年增加“上年”查询
+    main_y = max(years_to_fetch) if years_to_fetch else None
+    if main_y is not None:
+        year_queries.setdefault(main_y, [])
+        year_queries[main_y].extend([
+            f"{company_name} 本年 本期 净利润 营业收入 总资产 股东权益",
+            f"{company_name} 本期数 本年数 利润表 资产负债表",
+        ])
+    prev_y = main_y - 1 if main_y else None
+    if prev_y is not None and prev_y in year_queries:
+        year_queries[prev_y].extend([
+            f"{company_name} 上年 去年同期 净利润 营业收入 总资产",
+        ])
+
+    context_by_year: Dict[int, str] = {y: [] for y in years_to_fetch}
+    seen_node_ids = set()
+
+    for year in years_to_fetch:
+        queries = year_queries.get(year, [])
+        year_str = str(year)
+        # 关键词：该年出现，或（主年用本期/本年，上年用上年）
+        must_contain = [year_str]
+        if year == main_y:
+            must_contain.extend(["本年", "本期", "本期数", "本年数"])
+        if year == prev_y:
+            must_contain.append("上年")
+
+        for query in queries[:6]:
+            try:
+                nodes = retriever.retrieve(query)
+                if filename:
+                    nodes = [
+                        n for n in nodes
+                        if n.metadata.get("filename") == filename or n.metadata.get("source_file") == filename
+                    ]
+                for node in nodes:
+                    if id(node) in seen_node_ids:
+                        continue
+                    text = getattr(node, "text", None) or str(node)
+                    if not text or len(text.strip()) < 20:
+                        continue
+                    # 优先保留包含该年或对应关键词的片段，减少错年
+                    if any(kw in text for kw in must_contain):
+                        context_by_year[year].append(text)
+                        seen_node_ids.add(id(node))
+                if len(context_by_year[year]) >= max_chunks_per_year:
+                    break
+            except Exception as e:
+                logger.warning(f"按年检索失败 year={year} query={query[:50]}: {e}")
+                continue
+
+    out = {}
+    for y in years_to_fetch:
+        parts = context_by_year.get(y, [])
+        if parts:
+            out[y] = "\n\n".join(parts[:max_chunks_per_year])
+        else:
+            out[y] = ""
+    return out
+
+
 async def generate_dupont_analysis(
     company_name: str,
     year: str,
@@ -74,12 +160,13 @@ async def generate_dupont_analysis(
             if analysis_by_year:
                 result_dict["analysis_by_year"] = analysis_by_year
 
-        # 使用大模型生成更丰富的洞察（若失败则保留规则洞察）
+        # 使用大模型生成更丰富的洞察（主年份 + 趋势分析；若失败则保留规则洞察）
         try:
             llm_insights = await _generate_dupont_llm_insights(
                 company_name=company_name,
                 year=year,
-                dupont_result=result_dict
+                dupont_result=result_dict,
+                analysis_by_year=result_dict.get("analysis_by_year")
             )
             if llm_insights:
                 result_dict["insights"] = llm_insights.get("insights", result_dict.get("insights", []))
@@ -103,11 +190,13 @@ async def generate_dupont_analysis(
 async def _generate_dupont_llm_insights(
     company_name: str,
     year: str,
-    dupont_result: Dict[str, Any]
+    dupont_result: Dict[str, Any],
+    analysis_by_year: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """
     使用大模型生成杜邦分析洞察（丰富版）。
     仅基于已计算的杜邦指标输出，不得编造数值。
+    主分析年份与上传 PDF 报告年一致；洞察需包含主要年份指标 + 趋势分析。
     """
     try:
         from llama_index.core import Settings
@@ -141,22 +230,41 @@ async def _generate_dupont_llm_insights(
         "total_liabilities": _get_metric_value(level3.get("total_liabilities"))
     }
 
-    prompt = f"""
-你是资深财务分析师，请基于以下杜邦分析指标，为{company_name}{year}年生成“内容充分、结构清晰”的洞察。
+    # 构建趋势数据（上年或多年），供洞察中的趋势分析使用
+    trend_section = ""
+    if analysis_by_year and isinstance(analysis_by_year, dict):
+        other_years = [y for y in sorted(analysis_by_year.keys(), reverse=True) if y != str(year)][:2]
+        if other_years:
+            trend_lines = []
+            for oy in other_years:
+                entry = analysis_by_year.get(oy, {})
+                l1 = entry.get("level1", {})
+                roe = _get_metric_value(l1.get("roe"))
+                roa = _get_metric_value(l1.get("roa"))
+                em = _get_metric_value(l1.get("equity_multiplier"))
+                trend_lines.append(f"- {oy}年: ROE {roe}, ROA {roa}, 权益乘数 {em}")
+            trend_section = "\n## 其他年度（用于趋势对比）\n" + "\n".join(trend_lines)
 
-## 杜邦指标（只能使用这些数值，不得编造）
+    prompt = f"""
+你是资深财务分析师。请**主要分析{company_name}{year}年**的杜邦指标，并包含与上年/多年的趋势分析。
+
+## 主要分析年度：{year}年（与报告/上传PDF年份一致）
+以下杜邦指标均为 **{year}年** 的数据，请仅使用这些数值进行分析，不得编造。
+
+## {year}年杜邦指标（只能使用这些数值）
 {metrics_payload}
+{trend_section}
 
 ## 输出要求
 - 输出必须是JSON格式，字段如下：
 {{
-  "insights": ["综合洞察，至少5条，引用数值"],
+  "insights": ["综合洞察至少5条：必须包含①{year}年杜邦指标解读（ROE/ROA/净利率/周转率/权益乘数等）②杜邦指标趋势分析（与上年或多年对比，升/降及原因）"],
   "strengths": ["优势要点，至少2条，引用数值"],
   "weaknesses": ["劣势要点，至少2条，引用数值"],
   "recommendations": ["改进建议，至少2条，结合数值"]
 }}
-- 必须引用至少6个具体数值（例如：ROE、ROA、净利率、周转率、资产/权益规模等）
-- 洞察应覆盖：盈利能力、周转效率、杠杆结构、资产负债结构、规模体量
+- 必须引用至少6个具体数值（如ROE、ROA、净利率、周转率、资产/权益规模等）
+- 洞察必须包含：①主要年份（{year}年）的杜邦分析指标解读 ②杜邦分析指标的趋势分析（与上年对比或多年变化）
 - 不限制字数，尽量充分展开
 - 只输出JSON，不要有任何其他文本
 """
@@ -211,55 +319,66 @@ async def extract_financial_data_for_dupont(
     """
     try:
         logger.info(f"开始提取财务数据: {company_name} - {year} (文件: {filename or '全部'})")
-        
-        # 第一步：使用retriever获取相关文档片段
+
+        try:
+            main_year_int = int(year)
+        except (ValueError, TypeError):
+            main_year_int = None
+        years_to_fetch = []
+        if main_year_int is not None:
+            years_to_fetch = [main_year_int]
+            if main_year_int - 1 >= 2000:
+                years_to_fetch.append(main_year_int - 1)
+
+        # 第一步：使用 retriever，并做按年检索
         retriever = query_engine.retriever if hasattr(query_engine, 'retriever') else None
         if not retriever:
-            # 如果query_engine没有retriever，尝试从index获取
             if hasattr(query_engine, '_index'):
-                retriever = query_engine._index.as_retriever(similarity_top_k=15)
+                retriever = query_engine._index.as_retriever(similarity_top_k=20)
             elif hasattr(query_engine, 'index'):
-                retriever = query_engine.index.as_retriever(similarity_top_k=15)
-        
-        # 构建多个查询来获取不同方面的数据
-        queries = [
-            f"{company_name} {year}年 利润表 净利润 归属于母公司所有者的净利润",
-            f"{company_name} {year}年 利润表 营业收入 营业总收入",
-            f"{company_name} {year}年 资产负债表 总资产 资产总计",
-            f"{company_name} {year}年 资产负债表 股东权益 所有者权益 归属于母公司所有者权益",
-            f"{company_name} {year}年 资产负债表 流动资产 流动资产合计",
-            f"{company_name} {year}年 资产负债表 非流动资产 非流动资产合计",
-            f"{company_name} {year}年 加权平均净资产收益率 ROE 净资产收益率",
-            f"{company_name} {year}年 总资产收益率 平均总资产收益率 总资产报酬率 ROA 资产净利率",
-            f"{company_name} {year}年 营业净利润率 净利率",
-            f"{company_name} {year}年 资产周转率 总资产周转率",
-            f"{company_name} {year}年 权益乘数"
-        ]
-        
+                retriever = query_engine.index.as_retriever(similarity_top_k=20)
+
+        context_by_year: Dict[int, str] = {}
+        if retriever and years_to_fetch:
+            context_by_year = _retrieve_context_by_year(
+                retriever, company_name, years_to_fetch, filename=filename, max_chunks_per_year=10
+            )
+            logger.info(f"按年检索得到上下文: {list(context_by_year.keys())} 年, 长度: {[len(context_by_year.get(y, '')) for y in years_to_fetch]}")
+
+        # 主分析年优先使用该年专属上下文，避免混入上年
+        context_text = ""
+        if main_year_int is not None and context_by_year.get(main_year_int):
+            context_text = context_by_year[main_year_int]
+
+        # 备用：未指定年或按年为空时，用通用查询
         all_context = []
         if retriever:
+            queries = [
+                f"{company_name} {year}年 利润表 净利润 归属于母公司所有者的净利润",
+                f"{company_name} {year}年 利润表 营业收入 营业总收入",
+                f"{company_name} {year}年 资产负债表 总资产 资产总计",
+                f"{company_name} {year}年 资产负债表 股东权益 所有者权益",
+                f"{company_name} {year}年 加权平均净资产收益率 ROE 总资产收益率 ROA",
+            ]
             for query in queries:
                 try:
                     nodes = retriever.retrieve(query)
-                    # 如果指定了文件，过滤节点
                     if filename:
                         nodes = [
-                            node for node in nodes 
-                            if node.metadata.get('filename') == filename or 
-                               node.metadata.get('source_file') == filename
+                            n for n in nodes
+                            if n.metadata.get('filename') == filename or n.metadata.get('source_file') == filename
                         ]
-                    # 优先选择表格数据和财务报表数据
                     table_nodes = [n for n in nodes if n.metadata.get('document_type') == 'table_data' or n.metadata.get('is_financial_statement', False)]
                     if table_nodes:
-                        all_context.extend([node.text for node in table_nodes[:2]])
+                        all_context.extend([getattr(n, 'text', '') for n in table_nodes[:2]])
                     elif nodes:
-                        all_context.extend([node.text for node in nodes[:1]])
+                        all_context.append(getattr(nodes[0], 'text', ''))
                 except Exception as e:
-                    logger.warning(f"检索查询 '{query}' 失败: {str(e)}")
+                    logger.warning(f"检索 '{query[:40]}' 失败: {e}")
                     continue
-        
-        # 合并上下文
-        context_text = "\n\n".join(all_context[:10])  # 最多使用10个片段
+
+        if not context_text and all_context:
+            context_text = "\n\n".join(all_context[:10])
         
         # 如果没有获取到上下文，使用query_engine查询
         if not context_text:
@@ -299,7 +418,7 @@ async def extract_financial_data_for_dupont(
 1. 优先从表格数据中提取（表格数据最准确）
 2. 如果数据以"亿元"为单位，需要乘以100000000转换为元
 3. 如果数据以"万元"为单位，需要乘以10000转换为元
-4. 只提取{year}年度的数据
+4. **仅提取【报告年】{year}年**的数据：表格中若有“本期/本年/{year}年”列与“上年/同比”列，只填“本期/本年/{year}年”列的数值，不要使用上年或对比列
 5. 必须提取数值，不要使用"约"、"大约"等模糊表述
 6. 如果某个指标在文档中找不到，请设为null
 
@@ -462,13 +581,14 @@ async def extract_financial_data_for_dupont(
                 financial_data.update(table_data)
                 logger.info(f"从表格格式提取到 {len(table_data)} 个指标")
 
-        # 第四点五步：严格三步流程（检索→结构化→派生）
+        # 第四点五步：严格三步流程（检索→结构化→派生），按年上下文提高各年指标准确性
         structured_metrics = _build_structured_metrics_json(
             query_engine=query_engine,
             context_text=context_text,
             company_name=company_name,
             year=year,
-            seed_data=financial_data
+            seed_data=financial_data,
+            context_by_year=context_by_year if context_by_year else None,
         )
         if structured_metrics.get("metrics"):
             logger.info(f"结构化指标JSON: {structured_metrics}")
@@ -483,7 +603,14 @@ async def extract_financial_data_for_dupont(
                 "AssetTurnover": "资产周转率",
                 "EquityMultiplier": "权益乘数"
             }
+            # 仅使用【主分析年】的指标填充 financial_data，避免混入上年数据导致洞察错年
+            try:
+                main_year_int = int(year)
+            except (ValueError, TypeError):
+                main_year_int = None
             for metric in structured_metrics["metrics"]:
+                if main_year_int is not None and metric.get("year") is not None and int(metric.get("year")) != main_year_int:
+                    continue
                 target_key = metric_map.get(metric.get("metric"))
                 if target_key and metric.get("value") is not None:
                     financial_data[target_key] = metric["value"]
@@ -874,10 +1001,12 @@ def _extract_metric_from_text(
 
 def _extract_yeared_metrics_from_table(
     text: str,
-    metric_defs: List[Dict[str, Any]]
+    metric_defs: List[Dict[str, Any]],
+    report_year: Optional[int] = None,
 ) -> Dict[str, Dict[int, Tuple[float, Optional[str], Optional[str]]]]:
     """
-    从表格文本中按年份列提取指标
+    从表格文本中按年份列提取指标。
+    支持表头为 2024年/2023年，也支持“本期/本年”->report_year、“上年”->report_year-1。
     返回: { metric_name: { year: (value, unit, source) } }
     """
     if not text:
@@ -937,7 +1066,7 @@ def _extract_yeared_metrics_from_table(
         if len(parts) < 2:
             continue
 
-        # 检测表头年份行
+        # 1) 表头为显式年份 2024年 / 2023年
         years_in_line = [int(y) for y in re.findall(r'(20\d{2})', line)]
         if len(years_in_line) >= 1 and any('年' in p or re.match(r'20\d{2}', p) for p in parts):
             header_years = {}
@@ -947,6 +1076,28 @@ def _extract_yeared_metrics_from_table(
                     header_years[idx] = int(match.group(1))
             header_unit = detect_unit(line)
             continue
+
+        # 2) 表头为“本期/本年”与“上年”，用 report_year 映射
+        if report_year is not None and not header_years:
+            col_keywords = [
+                ("本期", report_year),
+                ("本年", report_year),
+                ("本期数", report_year),
+                ("本年数", report_year),
+                ("上年", report_year - 1),
+                ("去年同期", report_year - 1),
+                ("上年同期", report_year - 1),
+            ]
+            for idx, cell in enumerate(parts):
+                cell_n = normalize_cell(cell)
+                for kw, y in col_keywords:
+                    if kw in cell_n:
+                        header_years = header_years or {}
+                        header_years[idx] = y
+                        break
+            if header_years:
+                header_unit = detect_unit(line)
+                continue
 
         if not header_years:
             continue
@@ -1091,10 +1242,12 @@ def _build_structured_metrics_json(
     context_text: str,
     company_name: str,
     year: str,
-    seed_data: Optional[Dict[str, float]] = None
+    seed_data: Optional[Dict[str, float]] = None,
+    context_by_year: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
     """
-    按三步流程构建结构化指标JSON（不计算非规定指标）
+    按三步流程构建结构化指标JSON（不计算非规定指标）。
+    context_by_year: 按年分的上下文，用于每年单独做表格/文本提取，提高年份对应准确性。
     """
     metric_defs = [
         {
@@ -1154,10 +1307,21 @@ def _build_structured_metrics_json(
         "Equity": "股东权益"
     }
 
-    table_metric_values = _extract_yeared_metrics_from_table(context_text, metric_defs)
+    # 按年上下文：每年用该年专属上下文做表格/文本提取，减少错年
+    table_metric_values = {}
+    if context_by_year:
+        for target_year in years_to_fetch:
+            ct = context_by_year.get(target_year) or context_text
+            one = _extract_yeared_metrics_from_table(ct, metric_defs, report_year=year_value)
+            for metric_name, year_vals in one.items():
+                if target_year in year_vals:
+                    table_metric_values.setdefault(metric_name, {})[target_year] = year_vals[target_year]
+    if not table_metric_values:
+        table_metric_values = _extract_yeared_metrics_from_table(context_text, metric_defs, report_year=year_value)
 
     for target_year in years_to_fetch:
         year_text = f"{target_year}年" if target_year else f"{year}年"
+        ctx_for_year = (context_by_year or {}).get(target_year) or context_text
         for metric_def in metric_defs:
             if any(m.get("metric") == metric_def["metric"] and m.get("year") == target_year for m in metrics):
                 continue
@@ -1174,7 +1338,7 @@ def _build_structured_metrics_json(
                 })
                 continue
             text_year_value = _extract_metric_by_year_from_text(
-                context_text,
+                ctx_for_year,
                 metric_def["aliases"],
                 target_year,
                 metric_def["type"]
@@ -1194,7 +1358,7 @@ def _build_structured_metrics_json(
             query = f"{company_name}{year_text} {query_aliases} 的披露数值是多少？请给出数值和单位"
             response = query_engine.query(query)
             response_text = str(response)
-            search_text = f"{response_text}\n{context_text}"
+            search_text = f"{response_text}\n{ctx_for_year}"
             value, source, unit = _extract_metric_from_text(
                 search_text, metric_def["aliases"], metric_def["type"]
             )
@@ -1240,7 +1404,13 @@ def _build_structured_metrics_json(
                     "yoy": None
                 })
 
-    # 额外补充：同一行包含两年数值的情况（优先补前一年）
+    # 额外补充：同一行包含两年数值的情况（优先补前一年），用合并的按年上下文
+    two_year_context = context_text
+    if context_by_year and year_value and prev_year_value:
+        two_year_context = "\n\n".join([
+            (context_by_year.get(year_value) or ""),
+            (context_by_year.get(prev_year_value) or ""),
+        ]).strip() or context_text
     if year_value and prev_year_value:
         for metric_def in metric_defs:
             if metric_def["type"] == "percent":
@@ -1250,7 +1420,7 @@ def _build_structured_metrics_json(
             if has_prev:
                 continue
             cur_val, prev_val, unit, source = _extract_two_year_values_from_text(
-                context_text,
+                two_year_context,
                 metric_def["aliases"],
                 metric_def["type"]
             )
@@ -1351,17 +1521,34 @@ def _build_structured_metrics_json(
                 "formula": "资产周转率 = ROA / 净利率"
             })
 
-    # 保存为JSON文件（含派生指标）
+    # 保存为JSON文件：按年分别保存（如 2024 一个 json、2023 一个 json），便于与上传 PDF 年份对齐
     try:
         safe_company = re.sub(r'[^\w\u4e00-\u9fff\-]+', '_', company_name or 'unknown')
-        safe_year = re.sub(r'[^\d]+', '', str(year or ''))
-        filename = f"dupont_metrics_{safe_company}_{safe_year or 'unknown'}.json"
         output_dir = Path(__file__).parent.parent / "storage"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / filename
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump({"metrics": metrics}, f, ensure_ascii=False, indent=2)
-        logger.info(f"结构化指标JSON已保存: {output_path}")
+        years_in_metrics = sorted({m.get("year") for m in metrics if m.get("year") is not None}, reverse=True)
+        for y in years_in_metrics:
+            safe_y = str(y)
+            per_year_metrics = [m for m in metrics if m.get("year") == y]
+            if not per_year_metrics:
+                continue
+            # 序列化时统一 year 为字符串，便于前端与接口一致
+            payload = [
+                {**m, "year": str(m.get("year"))} if m.get("year") is not None else m
+                for m in per_year_metrics
+            ]
+            filename_per_year = f"dupont_metrics_{safe_company}_{safe_y}.json"
+            output_path = output_dir / filename_per_year
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump({"metrics": payload, "year": safe_y, "company_name": company_name}, f, ensure_ascii=False, indent=2)
+            logger.info(f"杜邦指标按年已保存: {output_path} ({len(per_year_metrics)} 条)")
+        # 同时保存一份包含所有年份的汇总（用于前端多年度切换）
+        safe_year = re.sub(r'[^\d]+', '', str(year or ''))
+        filename_all = f"dupont_metrics_{safe_company}_{safe_year or 'unknown'}.json"
+        output_path_all = output_dir / filename_all
+        with open(output_path_all, "w", encoding="utf-8") as f:
+            json.dump({"metrics": metrics, "company_name": company_name}, f, ensure_ascii=False, indent=2)
+        logger.info(f"结构化指标JSON已保存: {output_path_all}")
     except Exception as e:
         logger.warning(f"保存结构化指标JSON失败: {str(e)}")
 

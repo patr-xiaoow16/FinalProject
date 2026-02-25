@@ -2156,8 +2156,8 @@ body {
 
 .chart-container-inline {
     width: 100%;
-    min-height: 280px;
-    max-height: 320px;
+    min-height: 300px;
+    max-height: 380px;
     background: white;
     border-radius: 8px;
     position: relative;
@@ -2168,8 +2168,8 @@ body {
 
 .chart-container-inline > div {
     width: 100% !important;
-    min-height: 280px;
-    max-height: 320px;
+    min-height: 300px;
+    max-height: 380px;
 }
 
 .visualization-content {

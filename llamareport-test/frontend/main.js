@@ -1857,13 +1857,18 @@ const App = {
         const controller = new AbortController()
         const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000) // 15分钟超时
         
+        // 优先使用选中的文件，以便洞察与 PDF 年份一致；未选中时使用第一个已上传文件
+        const filenameToUse = selectedFile.value?.filename || (files.value?.length ? files.value[0].filename : null)
+        if (!filenameToUse) {
+          showMessage('warning', '请先上传并选择要分析的文档，以便使用正确的报告年份')
+        }
         const response = await fetch('/query/dupont-analysis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             company_name: null,  // 自动提取
             year: null,  // 自动提取
-            filename: selectedFile.value?.filename || null  // 传递选中的文件名
+            filename: filenameToUse  // 与 PDF 对齐：仅从该文件提取年份与数据
           }),
           signal: controller.signal
         })
@@ -1926,7 +1931,9 @@ const App = {
             content += `- 资产净利率(ROA): ${roa}\n`
             content += `- 权益乘数: ${equityMultiplier}\n\n`
           }
-          
+          if (result.year_from_document === false && result.year) {
+            content += `\n⚠️ 未从当前文档中识别到报告年份，已使用 ${result.year} 年；若与 PDF 年份不一致，请先选择对应报告文件再生成杜邦分析。\n`
+          }
           chatMessages.value.push({ 
             type: 'assistant', 
             content: content, 

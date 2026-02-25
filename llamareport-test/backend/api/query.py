@@ -587,12 +587,18 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
                         company_name = name_clean
                         logger.info(f"从文件名提取公司名称: {company_name}")
                 
-                # 从文件名提取年份
+                # 从文件名提取年份（与上传 PDF 报告年对齐：优先“年报/报告”前的年份，否则取最后一个4位数）
                 if not year:
-                    year_match = re.search(r'(\d{4})', filename)
-                    if year_match:
-                        year = year_match.group(1)
-                        logger.info(f"从文件名提取年份: {year}")
+                    # 优先：xxx2024年年报.pdf / xxx2024年报告.pdf → 2024
+                    report_year_match = re.search(r'(\d{4})年?(?:报|年报|报告|度)?(?:\.|$)', filename)
+                    if report_year_match:
+                        year = report_year_match.group(1)
+                        logger.info(f"从文件名提取报告年份（年报/报告）: {year}")
+                    else:
+                        all_years = re.findall(r'\d{4}', filename)
+                        if all_years:
+                            year = all_years[-1]  # 取最后一个4位数，通常对应报告年
+                            logger.info(f"从文件名提取年份: {year}")
             
             # 第二步：如果还没有，从文档内容中提取
             if not company_name or not year:
@@ -609,10 +615,14 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
                             if node.metadata.get('filename') == filename or 
                                node.metadata.get('source_file') == filename
                         ]
-                        # 如果指定文件没有找到，尝试从所有文件提取（可能是其他相关文件）
+                        # 指定文件时只使用该文件的节点，避免混入其他文件年份导致洞察与 PDF 不一致
                         if not matching_nodes:
-                            logger.info(f"指定文件 {filename} 中未找到公司信息，尝试从所有文件提取...")
-                            matching_nodes = nodes[:10]  # 使用前10个节点
+                            # 再试一次：仅用“报告年度/年份”检索，提高命中该文件的概率
+                            nodes_year = retriever.retrieve("报告年度 报告年份 本报告 年度")
+                            matching_nodes = [
+                                n for n in nodes_year
+                                if n.metadata.get('filename') == filename or n.metadata.get('source_file') == filename
+                            ][:10]
                     else:
                         # 从所有文件提取
                         nodes = retriever.retrieve("公司名称 年份 报告年度")
@@ -640,25 +650,36 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
                                         break
                         
                         if not year:
-                            # 从文本中提取年份（更全面的模式）
-                            year_patterns = [
+                            # 从文本中提取年份：优先“报告年度/本报告”等明确的主报告年，避免选成对比年（如2023）
+                            report_year_patterns = [
                                 r'报告年度[：:]\s*(\d{4})',
-                                r'(\d{4})年度',
+                                r'本报告[期]?\s*[（(]?\s*(\d{4})\s*年',
                                 r'(\d{4})年[度]?报告',
-                                r'(\d{4})年[度]?',
-                                r'截至(\d{4})年',
+                                r'(\d{4})年度报告',
                             ]
-                            for pattern in year_patterns:
-                                year_matches = re.findall(pattern, all_text)
-                                if year_matches:
-                                    # 选择最常见的年份（通常是报告年份）
-                                    from collections import Counter
-                                    year_counts = Counter(year_matches)
-                                    candidate_year = year_counts.most_common(1)[0][0]
-                                    # 验证年份合理性
+                            for pattern in report_year_patterns:
+                                m = re.search(pattern, all_text)
+                                if m:
+                                    candidate_year = m.group(1)
                                     if 2000 <= int(candidate_year) <= 2030:
                                         year = candidate_year
-                                        logger.info(f"从文档内容提取年份: {year} (出现 {year_counts[candidate_year]} 次)")
+                                        logger.info(f"从文档内容提取报告年份（优先）: {year}")
+                                        break
+                            if not year:
+                                year_patterns = [
+                                    r'(\d{4})年度',
+                                    r'(\d{4})年[度]?',
+                                    r'截至(\d{4})年',
+                                ]
+                                from collections import Counter
+                                for pattern in year_patterns:
+                                    year_matches = re.findall(pattern, all_text)
+                                    if year_matches:
+                                        year_counts = Counter(year_matches)
+                                        candidate_year = year_counts.most_common(1)[0][0]
+                                        if 2000 <= int(candidate_year) <= 2030:
+                                            year = candidate_year
+                                            logger.info(f"从文档内容提取年份: {year} (出现 {year_counts[candidate_year]} 次)")
                                         break
                         
                         logger.info(f"从文档内容提取: {company_name or '未找到'} - {year or '未找到'}")
@@ -729,13 +750,19 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
             company_name = "未知公司"
             logger.warning("未找到公司名称，使用默认值")
         
+        year_from_document = bool(year)
         if not year:
-            # 使用当前年份的前一年作为默认值
             from datetime import datetime
             year = str(datetime.now().year - 1)
-            logger.warning(f"未找到年份，使用默认值: {year}")
+            if filename:
+                logger.warning(
+                    f"指定文件 {filename} 中未识别到报告年份，已使用默认年份 {year}，"
+                    "洞察可能与 PDF 报告年份不一致，请核对文档或确保文件名/内容包含年份"
+                )
+            else:
+                logger.warning(f"未找到年份，使用默认值: {year}")
         
-        logger.info(f"开始生成杜邦分析: {company_name} - {year}")
+        logger.info(f"开始生成杜邦分析: {company_name} - {year} (年份来自文档: {year_from_document})")
         
         # 注意：不再在这里预先提取数据，让 generate_dupont_analysis 内部的 extract_financial_data_for_dupont 
         # 使用结构化LLM输出方法提取数据，这样更准确（和 quick-overview 使用相同的方法）
@@ -774,8 +801,9 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
         # 转换结果
         serializable_result = convert_decimal_to_float(dupont_result)
 
-        # 读取结构化指标JSON（用于前端年份切换）
+        # 读取结构化指标JSON：按年分读（2024 一个 json、2023 一个 json），与上传 PDF 年份对齐
         metrics_json = None
+        metrics_by_year = {}
         try:
             import json
             import re
@@ -783,21 +811,38 @@ async def generate_dupont_analysis_api(request: DupontAnalysisRequest):
 
             safe_company = re.sub(r'[^\w\u4e00-\u9fff\-]+', '_', company_name or 'unknown')
             safe_year = re.sub(r'[^\d]+', '', str(year or ''))
-            metrics_path = Path("storage") / f"dupont_metrics_{safe_company}_{safe_year or 'unknown'}.json"
-            if metrics_path.exists():
-                with open(metrics_path, "r", encoding="utf-8") as f:
-                    metrics_json = json.load(f)
+            storage_dir = Path("storage")
+            if storage_dir.exists():
+                # 主分析年单文件（兼容前端）
+                metrics_path = storage_dir / f"dupont_metrics_{safe_company}_{safe_year or 'unknown'}.json"
+                if metrics_path.exists():
+                    with open(metrics_path, "r", encoding="utf-8") as f:
+                        metrics_json = json.load(f)
+                # 按年分读所有该公司的 json
+                prefix = f"dupont_metrics_{safe_company}_"
+                for p in storage_dir.glob(prefix + "*.json"):
+                    try:
+                        stem = p.stem
+                        y = stem.replace(prefix, "").strip()
+                        if y.isdigit() and 2000 <= int(y) <= 2030:
+                            with open(p, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            metrics_by_year[y] = data.get("metrics", data) if isinstance(data, dict) else data
+                    except Exception as e:
+                        logger.warning(f"读取按年杜邦JSON失败 {p}: {e}")
         except Exception as e:
             logger.warning(f"读取结构化指标JSON失败: {str(e)}")
-        
+
         return JSONResponse(
             status_code=200,
             content={
                 "status": "success",
                 "company_name": company_name,
                 "year": year,
+                "year_from_document": year_from_document,  # True=从文档/文件名识别，False=使用默认年
                 "analysis": serializable_result,
-                "metrics": metrics_json
+                "metrics": metrics_json,
+                "metrics_by_year": metrics_by_year if metrics_by_year else None,
             }
         )
         
