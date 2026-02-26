@@ -595,6 +595,69 @@ const App = {
       return [headerLine, divider, ...bodyLines].join('\n')
     }
 
+    const cleanTableCellText = (cell = '') => String(cell ?? '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/\\\|/g, '|')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/_([^_]+)_/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    const splitPipeCells = (line = '') => {
+      const t = String(line || '').trim()
+      if (!t.startsWith('|') || !t.endsWith('|')) return []
+      return t
+        .slice(1, -1)
+        .split('|')
+        .map(cell => cleanTableCellText(cell))
+    }
+
+    const extractMarkdownTables = (text = '') => {
+      const lines = String(text || '').split('\n')
+      const tables = []
+      let i = 0
+      while (i < lines.length) {
+        const header = (lines[i] || '').trim()
+        const divider = (lines[i + 1] || '').trim()
+        if (header.startsWith('|') && header.endsWith('|') && /^\|[\s\-:|]+\|$/.test(divider)) {
+          const headers = splitPipeCells(header)
+          const rows = []
+          i += 2
+          while (i < lines.length) {
+            const rowLine = (lines[i] || '').trim()
+            if (!rowLine) {
+              i += 1
+              continue
+            }
+            if (!(rowLine.startsWith('|') && rowLine.endsWith('|'))) break
+            const rowCells = splitPipeCells(rowLine)
+            const normalized = rowCells.slice(0, headers.length)
+            while (normalized.length < headers.length) normalized.push('')
+            rows.push(normalized)
+            i += 1
+          }
+          if (headers.length >= 2 && rows.length > 0) {
+            tables.push({ headers, rows })
+          }
+          continue
+        }
+        i += 1
+      }
+      return tables
+    }
+
+    const parseMetricNumber = (value) => {
+      const raw = String(value ?? '')
+        .replace(/[，,]/g, '')
+        .replace(/%/g, '')
+        .replace(/[^\d.+-]/g, '')
+      const n = Number(raw)
+      return Number.isFinite(n) ? n : null
+    }
+
     const normalizeInsightText = (text = '') => stripHtmlTags(text)
       .replace(/\s+/g, '')
       .replace(/[：:、，,.;。；]/g, '')
@@ -1719,6 +1782,88 @@ const App = {
               }
               const cardInsights = toolOutput.card_insights || {}
               const cardsToAdd = []
+              const buildEarningsTableInsight = (table, title = '') => {
+                const headers = Array.isArray(table?.headers) ? table.headers : []
+                const rows = Array.isArray(table?.rows) ? table.rows : []
+                const rowCount = rows.length
+                const colCount = headers.length
+                const firstCol = rows.map(r => String(r?.[0] || '').trim()).filter(Boolean)
+                const sampleItems = firstCol.slice(0, 3).join('、')
+                if (sampleItems) {
+                  return `${title || '盈利预测表格'}：共${rowCount}行、${colCount}列。重点字段包含${sampleItems}等。`
+                }
+                return `${title || '盈利预测表格'}：共${rowCount}行、${colCount}列。`
+              }
+              const buildEarningsScenarioInsights = ({
+                scenarioNames = [],
+                revenueValues = [],
+                revenueYoYValues = [],
+                profitValues = [],
+                profitYoYValues = [],
+                epsValues = []
+              }) => {
+                if (!scenarioNames.length) return []
+                const pair = (names, vals) => names.map((n, i) => ({ name: n, value: vals[i] })).filter(x => x.value !== null && x.value !== undefined)
+                const revPairs = pair(scenarioNames, revenueValues)
+                const profitPairs = pair(scenarioNames, profitValues)
+                const epsPairs = pair(scenarioNames, epsValues)
+                const revYoYPairs = pair(scenarioNames, revenueYoYValues)
+                const profitYoYPairs = pair(scenarioNames, profitYoYValues)
+                const pickMax = (arr) => arr.reduce((a, b) => (a.value > b.value ? a : b))
+                const pickMin = (arr) => arr.reduce((a, b) => (a.value < b.value ? a : b))
+                const insights = []
+                if (profitPairs.length >= 2) {
+                  const best = pickMax(profitPairs)
+                  const worst = pickMin(profitPairs)
+                  const spread = (best.value - worst.value).toFixed(2)
+                  insights.push({
+                    insight_type: 'trend',
+                    description: `净利润弹性清晰：${best.name}最高、${worst.name}最低，情景差约${spread}。`,
+                    key_findings: [
+                      `${best.name}净利润：${best.value}`,
+                      `${worst.name}净利润：${worst.value}`,
+                      `情景差值：${spread}`
+                    ]
+                  })
+                }
+                if (revPairs.length >= 2) {
+                  const maxRev = pickMax(revPairs)
+                  const minRev = pickMin(revPairs)
+                  insights.push({
+                    insight_type: 'distribution',
+                    description: `营收呈梯度分化：${maxRev.name}最高、${minRev.name}最低，假设变化传导明显。`,
+                    key_findings: [
+                      `${maxRev.name}营收：${maxRev.value}`,
+                      `${minRev.name}营收：${minRev.value}`
+                    ]
+                  })
+                }
+                if (profitYoYPairs.length >= 2 || revYoYPairs.length >= 2) {
+                  const revWorst = revYoYPairs.length ? pickMin(revYoYPairs) : null
+                  const profitWorst = profitYoYPairs.length ? pickMin(profitYoYPairs) : null
+                  const riskFindings = []
+                  if (revWorst) riskFindings.push(`${revWorst.name}营收同比最低：${revWorst.value}%`)
+                  if (profitWorst) riskFindings.push(`${profitWorst.name}净利润同比最低：${profitWorst.value}%`)
+                  insights.push({
+                    insight_type: 'risk',
+                    description: '下行情景对利润冲击更大，需重点跟踪息差与信用成本的同步恶化风险。',
+                    key_findings: riskFindings
+                  })
+                }
+                if (epsPairs.length >= 2) {
+                  const top = pickMax(epsPairs)
+                  const bottom = pickMin(epsPairs)
+                  insights.push({
+                    insight_type: 'signal',
+                    description: 'EPS对情景变化敏感，可作为盈利兑现与预期修正的优先跟踪指标。',
+                    key_findings: [
+                      `${top.name}EPS最高：${top.value}`,
+                      `${bottom.name}EPS最低：${bottom.value}`
+                    ]
+                  })
+                }
+                return insights
+              }
               if (toolOutput.correlation_visualization && toolOutput.correlation_visualization.has_visualization) {
                 cardsToAdd.push({
                   id: `investment-strategy-correlation-${Date.now()}`,
@@ -1832,6 +1977,134 @@ const App = {
                   }
                 })
               }
+
+              // 盈利预测：在输出洞察文本的同时，自动生成多张可视化视图卡片
+              const isEarningsForecast = toolOutput.model_type === 'earnings_forecast' || modelType === 'earnings_forecast'
+              if (isEarningsForecast && answerText) {
+                const mdTables = extractMarkdownTables(answerText)
+                console.log('📊 [盈利预测] Markdown表格数量:', mdTables.length)
+
+                // 1) 每个 Markdown 表格生成 financial_table 卡片（数量不限制，最多取前12张防止界面过载）
+                mdTables.slice(0, 12).forEach((table, idx) => {
+                  const title = idx === 0 ? '盈利预测-历史财务数据' : `盈利预测-表格${idx + 1}`
+                  cardsToAdd.push({
+                    id: `earnings-forecast-table-${Date.now()}-${idx}`,
+                    question: title,
+                    source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'financial_table',
+                    data: {
+                      has_visualization: true,
+                      type: 'financial_table',
+                      table: {
+                        title,
+                        headers: table.headers,
+                        rows: table.rows,
+                        insight: buildEarningsTableInsight(table, title)
+                      }
+                    }
+                  })
+                })
+
+                // 2) 从情景结果表生成多张图表卡（营收/净利润/EPS/同比）
+                const scenarioTable = mdTables.find(t => {
+                  const hs = (t.headers || []).map(h => String(h))
+                  return hs.some(h => h.includes('情景')) &&
+                    hs.some(h => h.includes('营收') || h.includes('营业收入')) &&
+                    hs.some(h => h.includes('净利润'))
+                })
+                if (scenarioTable) {
+                  const headers = scenarioTable.headers || []
+                  const rows = scenarioTable.rows || []
+                  const findIndex = (keys = []) => headers.findIndex(h => keys.some(k => String(h).includes(k)))
+                  const idxScenario = findIndex(['情景', '场景'])
+                  const idxRevenue = findIndex(['预测营收', '预测营业收入', '营业收入'])
+                  const idxRevenueYoY = findIndex(['营收同比', '营收同比增速', '收入同比'])
+                  const idxProfit = findIndex(['预测净利润', '预测归属净利润', '净利润'])
+                  const idxProfitYoY = findIndex(['净利润同比', '净利润同比增速'])
+                  const idxEps = findIndex(['预测EPS', 'EPS'])
+
+                  const scenarioNames = rows.map(r => String(r[idxScenario] || '').replace(/\*/g, '').trim()).filter(Boolean)
+                  const revenueValues = rows.map(r => parseMetricNumber(r[idxRevenue])).filter(v => v !== null)
+                  const revenueYoYValues = rows.map(r => parseMetricNumber(r[idxRevenueYoY])).filter(v => v !== null)
+                  const profitValues = rows.map(r => parseMetricNumber(r[idxProfit])).filter(v => v !== null)
+                  const profitYoYValues = rows.map(r => parseMetricNumber(r[idxProfitYoY])).filter(v => v !== null)
+                  const epsValues = rows.map(r => parseMetricNumber(r[idxEps])).filter(v => v !== null)
+                  const scenarioInsights = buildEarningsScenarioInsights({
+                    scenarioNames,
+                    revenueValues,
+                    revenueYoYValues,
+                    profitValues,
+                    profitYoYValues,
+                    epsValues
+                  })
+
+                  if (scenarioNames.length >= 2 && revenueValues.length === scenarioNames.length && profitValues.length === scenarioNames.length) {
+                    cardsToAdd.push({
+                      id: `earnings-forecast-core-${Date.now()}`,
+                      question: '盈利预测-三情景核心指标对比',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            { type: 'bar', name: '预测营收', x: scenarioNames, y: revenueValues },
+                            { type: 'bar', name: '预测净利润', x: scenarioNames, y: profitValues },
+                            ...(epsValues.length === scenarioNames.length ? [{ type: 'bar', name: '预测EPS', x: scenarioNames, y: epsValues, yaxis: 'y2' }] : [])
+                          ],
+                          layout: {
+                            title: '盈利预测三情景核心指标对比',
+                            barmode: 'group',
+                            xaxis_title: '情景',
+                            yaxis_title: '金额（亿元）',
+                            ...(epsValues.length === scenarioNames.length ? {
+                              yaxis2: { title: 'EPS', overlaying: 'y', side: 'right' }
+                            } : {})
+                          }
+                        },
+                        insights: scenarioInsights.length
+                          ? scenarioInsights
+                          : [{ insight_type: 'trend', description: '基于悲观/中性/乐观三情景的营收、净利润与EPS对比。' }]
+                      }
+                    })
+                  }
+
+                  if (scenarioNames.length >= 2 && revenueYoYValues.length === scenarioNames.length && profitYoYValues.length === scenarioNames.length) {
+                    cardsToAdd.push({
+                      id: `earnings-forecast-yoy-${Date.now()}`,
+                      question: '盈利预测-同比增速对比',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            { type: 'bar', name: '营收同比', x: scenarioNames, y: revenueYoYValues },
+                            { type: 'bar', name: '净利润同比', x: scenarioNames, y: profitYoYValues }
+                          ],
+                          layout: {
+                            title: '盈利预测三情景同比增速对比',
+                            barmode: 'group',
+                            xaxis_title: '情景',
+                            yaxis_title: '同比增速（%）'
+                          }
+                        },
+                        insights: scenarioInsights.length
+                          ? scenarioInsights
+                          : [{ insight_type: 'trend', description: '对比不同情景下营收与净利润同比弹性。' }]
+                      }
+                    })
+                  }
+                }
+              }
+
               cardsToAdd.forEach(card => visualizationCards.value.push(card))
               if (cardsToAdd.length > 0) {
                 showMessage('success', `✅ 已添加 ${cardsToAdd.length} 个投资策略视图到可视化面板`)
@@ -2721,4 +2994,3 @@ app.component('AgentAnalysisPage', AgentAnalysisPage)
 app.mount('#app')
 
 console.log('✅ Vue应用已加载')
-
