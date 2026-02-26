@@ -461,7 +461,7 @@ class ReportAgent:
                 "financial_review": "财务点评",
                 "business_guidance": "业绩指引",
                 "business_highlights": "业务亮点",
-                "profit_forecast": "投资策略（包含相关性分析、聚类分析、因子分析和盈利预测）"
+                "profit_forecast": "投资策略（包含相关性分析、聚类分析、因子分析、盈利预测和估值锚点分析）"
             }
             
             section_chinese = section_map.get(section_name, section_name)
@@ -488,9 +488,21 @@ class ReportAgent:
                             summary_text = earnings_report.strip()
                         else:
                             summary_text = tool_output.get("notes") or ""
+                    if effective_model_type == "valuation_anchor":
+                        valuation_report = tool_output.get("valuation_anchor_report")
+                        if isinstance(valuation_report, str) and valuation_report.strip():
+                            summary_text = valuation_report.strip()
+                        else:
+                            summary_text = tool_output.get("notes") or ""
+                    if effective_model_type == "comprehensive_strategy":
+                        comprehensive_report = tool_output.get("comprehensive_strategy_report")
+                        if isinstance(comprehensive_report, str) and comprehensive_report.strip():
+                            summary_text = comprehensive_report.strip()
+                        else:
+                            summary_text = tool_output.get("notes") or ""
 
                     # 非盈利预测模式：按投资策略结果组装摘要
-                    if effective_model_type != "earnings_forecast":
+                    if effective_model_type not in {"earnings_forecast", "valuation_anchor", "comprehensive_strategy"}:
                         # 优先使用综合洞察
                         comprehensive_insight = tool_output.get("comprehensive_insight")
                         if comprehensive_insight:

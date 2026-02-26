@@ -2105,6 +2105,254 @@ const App = {
                 }
               }
 
+              // 估值锚点分析：自动生成多张可视化卡片（表格 + 汇总对比图）
+              const isValuationAnchor = toolOutput.model_type === 'valuation_anchor' || modelType === 'valuation_anchor'
+              if (isValuationAnchor && answerText) {
+                const mdTables = extractMarkdownTables(answerText)
+                console.log('📊 [估值锚点] Markdown表格数量:', mdTables.length)
+
+                mdTables.slice(0, 12).forEach((table, idx) => {
+                  const title = idx === 0 ? '估值锚点-基础数据表' : `估值锚点-表格${idx + 1}`
+                  cardsToAdd.push({
+                    id: `valuation-anchor-table-${Date.now()}-${idx}`,
+                    question: title,
+                    source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'financial_table',
+                    data: {
+                      has_visualization: true,
+                      type: 'financial_table',
+                      table: {
+                        title,
+                        headers: table.headers,
+                        rows: table.rows,
+                        insight: `${title}：自动提取自估值锚点分析报告。`
+                      }
+                    }
+                  })
+                })
+
+                // 从“三种方法汇总表”生成估值区间对比图
+                const summaryTable = mdTables.find(t => {
+                  const hs = (t.headers || []).map(h => String(h))
+                  return hs.some(h => h.includes('估值方法')) &&
+                    hs.some(h => h.includes('悲观')) &&
+                    hs.some(h => h.includes('中性')) &&
+                    hs.some(h => h.includes('乐观')) &&
+                    hs.some(h => h.includes('当前股价'))
+                })
+                if (summaryTable) {
+                  const headers = summaryTable.headers || []
+                  const rows = summaryTable.rows || []
+                  const findIndex = (keys = []) => headers.findIndex(h => keys.some(k => String(h).includes(k)))
+                  const idxMethod = findIndex(['估值方法'])
+                  const idxBear = findIndex(['悲观', '下限'])
+                  const idxBase = findIndex(['中性'])
+                  const idxBull = findIndex(['乐观', '上限'])
+                  const idxCurrent = findIndex(['当前股价'])
+                  const idxUpside = findIndex(['上行空间'])
+
+                  const methods = rows.map(r => String(r[idxMethod] || '').replace(/\*/g, '').trim()).filter(Boolean)
+                  const bearVals = rows.map(r => parseMetricNumber(r[idxBear])).filter(v => v !== null)
+                  const baseVals = rows.map(r => parseMetricNumber(r[idxBase])).filter(v => v !== null)
+                  const bullVals = rows.map(r => parseMetricNumber(r[idxBull])).filter(v => v !== null)
+                  const currentVals = rows.map(r => parseMetricNumber(r[idxCurrent])).filter(v => v !== null)
+                  const upsideVals = rows.map(r => parseMetricNumber(r[idxUpside])).filter(v => v !== null)
+
+                  if (methods.length >= 2 && bearVals.length === methods.length && baseVals.length === methods.length && bullVals.length === methods.length) {
+                    cardsToAdd.push({
+                      id: `valuation-anchor-range-${Date.now()}`,
+                      question: '估值锚点-三方法估值区间对比',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            { type: 'bar', name: '悲观/下限', x: methods, y: bearVals },
+                            { type: 'bar', name: '中性', x: methods, y: baseVals },
+                            { type: 'bar', name: '乐观/上限', x: methods, y: bullVals },
+                            ...(currentVals.length === methods.length ? [{ type: 'scatter', mode: 'markers', name: '当前股价', x: methods, y: currentVals }] : [])
+                          ],
+                          layout: {
+                            title: '三方法估值区间对比',
+                            barmode: 'group',
+                            xaxis_title: '估值方法',
+                            yaxis_title: '估值（元）'
+                          }
+                        },
+                        insights: [
+                          { insight_type: 'trend', description: '对比PB/PE、股息率、DDM/DCF三方法估值中枢，识别一致区间。' },
+                          { insight_type: 'risk', description: '若当前股价高于多数方法中性估值，需关注估值回归风险。' }
+                        ]
+                      }
+                    })
+                  }
+
+                  if (methods.length >= 2 && upsideVals.length === methods.length) {
+                    cardsToAdd.push({
+                      id: `valuation-anchor-upside-${Date.now()}`,
+                      question: '估值锚点-中性上行空间对比',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            {
+                              type: 'bar',
+                              name: '上行空间(中性)',
+                              x: methods,
+                              y: upsideVals,
+                              marker: { color: upsideVals.map(v => (v >= 0 ? '#10b981' : '#ef4444')) }
+                            }
+                          ],
+                          layout: {
+                            title: '中性上行空间对比',
+                            xaxis_title: '估值方法',
+                            yaxis_title: '上行空间（%）'
+                          }
+                        },
+                        insights: [
+                          { insight_type: 'signal', description: '中性上行空间越高，方法对应的安全边际通常越充足。' }
+                        ]
+                      }
+                    })
+                  }
+                }
+              }
+
+              // 综合投资策略分析：自动生成多张可视化卡片（SWOT/评分/风险收益/跟踪指标）
+              const isComprehensiveStrategy = toolOutput.model_type === 'comprehensive_strategy' || modelType === 'comprehensive_strategy'
+              if (isComprehensiveStrategy && answerText) {
+                const mdTables = extractMarkdownTables(answerText)
+                console.log('📊 [综合策略] Markdown表格数量:', mdTables.length)
+
+                mdTables.slice(0, 12).forEach((table, idx) => {
+                  const title = idx === 0 ? '综合策略-SWOT/评分表' : `综合策略-表格${idx + 1}`
+                  cardsToAdd.push({
+                    id: `comprehensive-strategy-table-${Date.now()}-${idx}`,
+                    question: title,
+                    source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'financial_table',
+                    data: {
+                      has_visualization: true,
+                      type: 'financial_table',
+                      table: {
+                        title,
+                        headers: table.headers,
+                        rows: table.rows,
+                        insight: `${title}：自动提取自综合投资策略分析报告。`
+                      }
+                    }
+                  })
+                })
+
+                // 四维评估打分图
+                const scoreTable = mdTables.find(t => {
+                  const hs = (t.headers || []).map(h => String(h))
+                  return hs.some(h => h.includes('维度')) &&
+                    hs.some(h => h.includes('评分')) &&
+                    hs.some(h => h.includes('权重')) &&
+                    hs.some(h => h.includes('加权得分'))
+                })
+                if (scoreTable) {
+                  const headers = scoreTable.headers || []
+                  const rows = scoreTable.rows || []
+                  const findIndex = (keys = []) => headers.findIndex(h => keys.some(k => String(h).includes(k)))
+                  const idxDim = findIndex(['维度'])
+                  const idxScore = findIndex(['评分'])
+                  const idxWeighted = findIndex(['加权得分'])
+                  const dims = rows.map(r => String(r[idxDim] || '').replace(/\*/g, '').trim()).filter(Boolean)
+                  const scores = rows.map(r => parseMetricNumber(r[idxScore])).filter(v => v !== null)
+                  const weighted = rows.map(r => parseMetricNumber(r[idxWeighted])).filter(v => v !== null)
+                  if (dims.length >= 3 && scores.length === dims.length) {
+                    cardsToAdd.push({
+                      id: `comprehensive-strategy-score-${Date.now()}`,
+                      question: '综合策略-四维评估打分',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            { type: 'bar', name: '评分(1-5)', x: dims, y: scores },
+                            ...(weighted.length === dims.length ? [{ type: 'bar', name: '加权得分', x: dims, y: weighted }] : [])
+                          ],
+                          layout: {
+                            title: '四维评估打分对比',
+                            barmode: 'group',
+                            xaxis_title: '评估维度',
+                            yaxis_title: '分值'
+                          }
+                        },
+                        insights: [
+                          { insight_type: 'trend', description: '四维打分反映安全边际、盈利趋势、催化和风险的综合状态。' }
+                        ]
+                      }
+                    })
+                  }
+                }
+
+                // 上下行与风险收益比图
+                const rrTable = mdTables.find(t => {
+                  const hs = (t.headers || []).map(h => String(h))
+                  return hs.some(h => h.includes('估值方法')) &&
+                    hs.some(h => h.includes('当前股价')) &&
+                    hs.some(h => h.includes('上行空间'))
+                })
+                if (rrTable) {
+                  const headers = rrTable.headers || []
+                  const rows = rrTable.rows || []
+                  const findIndex = (keys = []) => headers.findIndex(h => keys.some(k => String(h).includes(k)))
+                  const idxMethod = findIndex(['估值方法'])
+                  const idxCurrent = findIndex(['当前股价'])
+                  const idxUpside = findIndex(['上行空间'])
+                  const methods = rows.map(r => String(r[idxMethod] || '').replace(/\*/g, '').trim()).filter(Boolean)
+                  const currentVals = rows.map(r => parseMetricNumber(r[idxCurrent])).filter(v => v !== null)
+                  const upsideVals = rows.map(r => parseMetricNumber(r[idxUpside])).filter(v => v !== null)
+                  if (methods.length >= 2 && upsideVals.length === methods.length) {
+                    cardsToAdd.push({
+                      id: `comprehensive-strategy-rr-${Date.now()}`,
+                      question: '综合策略-上行空间与当前价格',
+                      source: 'investment_strategy',
+                      timestamp: new Date(),
+                      type: 'chart',
+                      data: {
+                        has_visualization: true,
+                        visualization_type: 'plotly',
+                        chart_config: {
+                          chart_type: 'bar',
+                          traces: [
+                            { type: 'bar', name: '上行空间(中性)', x: methods, y: upsideVals },
+                            ...(currentVals.length === methods.length ? [{ type: 'scatter', mode: 'markers', name: '当前股价', x: methods, y: currentVals }] : [])
+                          ],
+                          layout: {
+                            title: '上行空间与当前价格对比',
+                            barmode: 'group',
+                            xaxis_title: '估值方法',
+                            yaxis_title: '数值'
+                          }
+                        },
+                        insights: [
+                          { insight_type: 'signal', description: '上行空间与风险收益比可用于判断交易性价比与仓位节奏。' }
+                        ]
+                      }
+                    })
+                  }
+                }
+              }
+
               cardsToAdd.forEach(card => visualizationCards.value.push(card))
               if (cardsToAdd.length > 0) {
                 showMessage('success', `✅ 已添加 ${cardsToAdd.length} 个投资策略视图到可视化面板`)

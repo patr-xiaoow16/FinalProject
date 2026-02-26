@@ -6,6 +6,7 @@
 import logging
 import re
 from typing import Dict, Any, List, Optional, Annotated
+import time
 from llama_index.core.tools import FunctionTool, QueryEngineTool
 from llama_index.core import Settings
 from llama_index.core.llms import ChatMessage
@@ -22,6 +23,41 @@ from agents.visualization_agent import generate_visualization_for_query
 # 相关性、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_factor_analysis（多元回归已移除）
 
 logger = logging.getLogger(__name__)
+
+# 简单内存缓存：避免重复点击时反复执行耗时步骤（按公司+年份）
+_STRATEGY_REPORT_CACHE: Dict[str, Dict[str, Any]] = {}
+_STRATEGY_CACHE_TTL_SECONDS = 60 * 60 * 6  # 6小时
+
+
+def _strategy_cache_key(company_name: str, year: str) -> str:
+    return f"{company_name.strip()}::{str(year).strip()}"
+
+
+def _get_cached_strategy_report(company_name: str, year: str, report_type: str) -> Optional[str]:
+    key = _strategy_cache_key(company_name, year)
+    bucket = _STRATEGY_REPORT_CACHE.get(key) or {}
+    record = bucket.get(report_type)
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("ts")
+    content = record.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    if not isinstance(ts, (int, float)) or (time.time() - ts) > _STRATEGY_CACHE_TTL_SECONDS:
+        return None
+    return content
+
+
+def _set_cached_strategy_report(company_name: str, year: str, report_type: str, content: str) -> None:
+    if not isinstance(content, str) or not content.strip():
+        return
+    key = _strategy_cache_key(company_name, year)
+    if key not in _STRATEGY_REPORT_CACHE:
+        _STRATEGY_REPORT_CACHE[key] = {}
+    _STRATEGY_REPORT_CACHE[key][report_type] = {
+        "content": content.strip(),
+        "ts": time.time()
+    }
 
 
 async def _generate_card_insight(llm: Any, context: str, card_type: str) -> str:
@@ -1957,6 +1993,10 @@ async def generate_profit_forecast_and_valuation(
             logger.info(f"仅生成相关性分析: {company_name} {year}年")
         elif _mt == "earnings_forecast":
             logger.info(f"仅生成盈利预测: {company_name} {year}年")
+        elif _mt == "valuation_anchor":
+            logger.info(f"仅生成估值锚点分析: {company_name} {year}年")
+        elif _mt == "comprehensive_strategy":
+            logger.info(f"仅生成综合投资策略分析: {company_name} {year}年")
         else:
             logger.info(f"开始生成投资策略（相关性分析、聚类分析、因子分析）: {company_name} {year}年")
         
@@ -1985,10 +2025,371 @@ async def generate_profit_forecast_and_valuation(
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
-        # 支持: all, correlation, clustering, correlation_only, factor_only, earnings_forecast（已去掉 regression_only）
+        # 支持: all, correlation, clustering, correlation_only, factor_only, earnings_forecast, valuation_anchor, comprehensive_strategy（已去掉 regression_only）
         normalized_model = (model_type or "all").lower()
-        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "factor_only", "earnings_forecast"}:
+        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "factor_only", "earnings_forecast", "valuation_anchor", "comprehensive_strategy"}:
             normalized_model = "all"
+
+        # 综合投资策略分析：基于盈利预测 + 估值锚点结论，输出SWOT/打分/上下行/策略/跟踪指标
+        if normalized_model == "comprehensive_strategy":
+            # 先尝试复用缓存，缺失时再补算，避免重复点击时重复执行耗时步骤
+            earnings_report = _get_cached_strategy_report(
+                company_name=company_name,
+                year=year,
+                report_type="earnings_forecast_report"
+            ) or ""
+            valuation_report = _get_cached_strategy_report(
+                company_name=company_name,
+                year=year,
+                report_type="valuation_anchor_report"
+            ) or ""
+
+            if earnings_report:
+                logger.info("✅ [strategy_cache] 命中盈利预测缓存: %s %s", company_name, year)
+            else:
+                logger.info("ℹ️ [strategy_cache] 盈利预测缓存未命中，开始补算: %s %s", company_name, year)
+                earnings_output = await generate_profit_forecast_and_valuation(
+                    company_name=company_name,
+                    year=year,
+                    query_engine=query_engine,
+                    model_type="earnings_forecast"
+                )
+                if isinstance(earnings_output, dict):
+                    earnings_report = str(earnings_output.get("earnings_forecast_report") or "")
+                if earnings_report.strip():
+                    _set_cached_strategy_report(
+                        company_name=company_name,
+                        year=year,
+                        report_type="earnings_forecast_report",
+                        content=earnings_report
+                    )
+
+            if valuation_report:
+                logger.info("✅ [strategy_cache] 命中估值锚点缓存: %s %s", company_name, year)
+            else:
+                logger.info("ℹ️ [strategy_cache] 估值锚点缓存未命中，开始补算: %s %s", company_name, year)
+                valuation_output = await generate_profit_forecast_and_valuation(
+                    company_name=company_name,
+                    year=year,
+                    query_engine=query_engine,
+                    model_type="valuation_anchor"
+                )
+                if isinstance(valuation_output, dict):
+                    valuation_report = str(valuation_output.get("valuation_anchor_report") or "")
+                if valuation_report.strip():
+                    _set_cached_strategy_report(
+                        company_name=company_name,
+                        year=year,
+                        report_type="valuation_anchor_report",
+                        content=valuation_report
+                    )
+
+            comprehensive_prompt = f"""
+基于Prompt 1的盈利预测和Prompt 2的估值分析，
+请完成以下综合投资策略的推导。
+
+【公司名称】{company_name}
+【报告年份】{year}
+
+可用原始年报数据：
+【年报表格数据】
+{str(table_data)}
+
+【年报正文数据】
+{str(report_data)}
+
+Prompt 1（盈利预测）输出：
+{earnings_report}
+
+Prompt 2（估值分析）输出：
+{valuation_report}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第一步：SWOT分析（数据驱动，非空泛描述）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+对该公司做SWOT分析，要求：
+- 每一条S/W/O/T都必须附带具体数据或年报引用（页码）
+- 不接受没有数据支撑的泛泛描述
+- 每个象限2-4条，共8-16条
+
+| 优势(S) | 数据支撑 |
+|---------|----------|
+| 1. ？ | 具体数字+页码 |
+| 2. ？ | |
+
+| 劣势(W) | 数据支撑 |
+|---------|----------|
+| 1. ？ | 具体数字+页码 |
+
+| 机会(O) | 数据支撑 |
+|---------|----------|
+| 1. ？ | 具体数字+页码 |
+
+| 威胁(T) | 数据支撑 |
+|---------|----------|
+| 1. ？ | 具体数字+页码 |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第二步：四维评估打分
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+对以下四个维度进行评估打分（1-5分），并说明理由：
+
+| 维度 | 评分(1-5) | 权重 | 加权得分 | 评分依据 |
+|------|-----------|------|----------|----------|
+| 安全边际 | ？ | 30% | ？ | 来自Prompt 2估值结论：当前PB/PE vs 历史分位 |
+| 盈利趋势 | ？ | 25% | ？ | 来自Prompt 1预测：营收/利润增速方向 |
+| 催化因素 | ？ | 25% | ？ | SWOT中的O+S：是否有近期可兑现的积极因素 |
+| 风险因素 | ？ | 20% | ？ | SWOT中的W+T：风险是否已被估值反映(风险低给高分) |
+| **综合** | | **100%** | **？** | **>3.5偏积极 / 2.5-3.5中性 / <2.5偏谨慎** |
+
+打分标准：
+- 5分：非常积极（如PB处于历史最低5%分位+盈利拐点确认）
+- 4分：积极（如估值低位+盈利企稳）
+- 3分：中性（如估值合理+盈利持平）
+- 2分：谨慎（如估值偏高或盈利下行）
+- 1分：非常谨慎（如估值泡沫+盈利恶化）
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第三步：上行/下行空间量化
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+基于Prompt 2的估值结论，计算：
+(a) 上行空间 = (中性目标价 - 当前股价) / 当前股价 = ？%
+(b) 下行风险 = (极端悲观价 - 当前股价) / 当前股价 = ？%
+(c) 风险收益比 = |上行空间| / |下行风险| = ？x
+    → >2x为好交易, 1-2x一般, <1x不划算
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第四步：分类策略建议
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+请对三类投资者分别给出策略：
+
+| 投资者类型 | 策略 | 建仓区间 | 目标价 | 止损价 | 核心逻辑 |
+|------------|------|----------|--------|--------|----------|
+| 价值型（看重安全边际+股息）| ？ | ？ | ？ | ？ | ？ |
+| 成长型（看重盈利拐点+催化）| ？ | ？ | ？ | ？ | ？ |
+| 配置型（板块均衡配置）| ？ | ？ | ？ | ？ | ？ |
+
+建仓区间和目标价必须用Prompt 2的估值结果推导（如"PB=0.5x对应？元"）。
+止损价必须有明确的估值或基本面触发条件。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第五步：关键跟踪指标
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+列出未来1-2个季度需要重点跟踪的3-5个指标，说明：
+- 该指标当前值是多少（来自年报）
+- 如果向好变化，意味着什么（加仓信号）
+- 如果向差变化，意味着什么（减仓/止损信号）
+
+| 跟踪指标 | 当前值 | 向好信号 | 向差信号 |
+|----------|--------|----------|----------|
+| ？ | ？ | ？ | ？ |
+
+输出要求：
+1. 使用 Markdown 完整输出，所有表格都使用标准 Markdown 管道格式。
+2. 所有关键结论必须带具体数据和页码/来源，缺失时标“页码待核实/需补充”。
+3. 结果要可执行，避免空泛描述。
+"""
+
+            comprehensive_raw = await llm.achat([
+                ChatMessage(role="system", content="你是专业卖方投资策略分析师。请严格按五步输出，强调数据证据、页码与可执行性。"),
+                ChatMessage(role="user", content=comprehensive_prompt)
+            ])
+            if hasattr(comprehensive_raw, "message") and hasattr(comprehensive_raw.message, "content"):
+                comprehensive_report = comprehensive_raw.message.content or ""
+            else:
+                comprehensive_report = str(comprehensive_raw or "")
+            if comprehensive_report.strip():
+                _set_cached_strategy_report(
+                    company_name=company_name,
+                    year=year,
+                    report_type="comprehensive_strategy_report",
+                    content=comprehensive_report
+                )
+
+            return {
+                "indicator_extraction": [],
+                "variable_table": [],
+                "correlation_results": [],
+                "strategy_conclusion": {"short_term": "", "long_term": "", "risk_control": "", "key_signals": []},
+                "data_sufficiency": {
+                    "is_sufficient": False,
+                    "reason": "综合策略模式不执行相关性/因子/聚类结构化分析",
+                    "sample_description": None
+                },
+                "clustering_model": None,
+                "notes": "综合投资策略分析模式执行完成",
+                "earnings_forecast_report": earnings_report.strip(),
+                "valuation_anchor_report": valuation_report.strip(),
+                "comprehensive_strategy_report": comprehensive_report.strip(),
+                "model_type": "comprehensive_strategy",
+                "company_name": company_name,
+                "year": year
+            }
+
+        # 估值锚点分析模式：基于年报与盈利预测上下文直接生成估值报告
+        if normalized_model == "valuation_anchor":
+            valuation_query = (
+                f"{company_name} {year}年 年报 每股净资产 BV 总股本 归属净利润 DPS 股息 加权平均ROE "
+                "归属股东权益 PB PE 估值 分红率 管理层讨论与分析"
+            )
+            valuation_data = query_engine.query(valuation_query)
+            valuation_prompt = f"""
+基于上一步的盈利预测结果和年报数据，请完成以下三种估值方法的分析。
+
+【公司名称】{company_name}
+【报告年份】{year}
+
+你可以使用以下检索数据：
+【年报表格数据】
+{str(table_data)}
+
+【年报正文数据】
+{str(report_data)}
+
+【补充估值相关数据】
+{str(valuation_data)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第一步：提取估值所需基础数据
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+从年报中提取以下数据（标注页码）：
+
+| 数据项 | 数值 | 年报页码 |
+|--------|------|----------|
+| 年末每股净资产(BV) | | |
+| 总股本(股) | | |
+| 归属净利润 | | |
+| 年度每股股息(DPS) | | |
+| 加权平均ROE | | |
+| 年末归属股东权益 | | |
+
+外部市场数据（需你自行搜索当前值）：
+| 数据项 | 数值 | 来源 |
+|--------|------|------|
+| 当前股价 | | 需搜索 |
+| 10年国债收益率 | | 需搜索 |
+| 同行业可比公司平均PB | | 需搜索 |
+| 同行业可比公司平均PE | | 需搜索 |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第二步：方法一——PB估值法（适合银行/重资产行业）
+或 PE估值法（适合消费/科技等轻资产行业）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【PB法】适用：银行、保险、地产、公用事业等净资产可靠的行业
+计算过程：
+(a) 当前PB = 当前股价 / 每股净资产 = ？ / ？ = ？x
+(b) 设定目标PB区间（基于可比公司和历史中枢）：
+    - 悲观PB = ？x → 对应股价 = ？x × BV = ？元
+    - 中性PB = ？x → 对应股价 = ？元
+    - 乐观PB = ？x → 对应股价 = ？元
+(c) 说明目标PB设定的依据（可比公司、历史分位数）
+
+【PE法】适用：消费、科技、医药、制造等盈利驱动的行业
+计算过程：
+(a) 当前PE(TTM) = 当前股价 / 本年EPS = ？ / ？ = ？x
+(b) 预测PE(Forward) = 当前股价 / 预测EPS(中性) = ？ / ？ = ？x
+(c) 设定目标PE区间（基于可比公司和历史中枢）：
+    - 悲观PE = ？x → 对应股价 = ？x × 预测EPS = ？元
+    - 中性PE = ？x → 对应股价 = ？元
+    - 乐观PE = ？x → 对应股价 = ？元
+(d) 说明目标PE设定的依据
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第三步：方法二——股息率估值法（适合高分红公司）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+计算过程：
+(a) 每股股息DPS = 年报披露值 = ？元
+(b) 分红率 = DPS × 总股本 / 归属净利润 = ？%
+(c) 当前股息率 = DPS / 当前股价 = ？%
+(d) 与无风险利率对比：股息率 - 10年国债收益率 = ？% （风险溢价）
+(e) 反推目标价：
+    - 若股息率回归行业均值？% → 目标价 = DPS / ？% = ？元
+    - 若维持当前股息率 → 价格 ≈ 当前股价
+
+如果该公司不分红或分红率极低，跳过此方法，说明原因。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第四步：方法三——DDM/DCF简化估值
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【DDM戈登模型】适合：稳定分红的成熟公司（银行、公用事业）
+(a) 可持续ROE假设 = ？%（来自Prompt 1的预测）
+(b) 分红率 b = ？%
+(c) 可持续增长率 g = ROE × (1-b) = ？%
+(d) 要求回报率 r = ？%（通常8%-12%，说明取值依据）
+(e) 理论PB = (ROE - g) / (r - g) = ？x
+(f) 理论股价 = 理论PB × BV = ？元
+
+检验：如果 r 接近 g，模型不稳定，需说明局限性。
+
+【DCF简化版】适合：高成长公司（科技、医药、新能源）
+(a) 预测未来3年自由现金流（基于Prompt 1的盈利预测 × 现金转化率）
+(b) 第4年起假设永续增长率 g = ？%
+(c) WACC = ？%
+(d) 企业价值 = Σ FCF/(1+WACC)^t + 终值/(1+WACC)^n
+(e) 股权价值 = 企业价值 - 净负债
+(f) 每股价值 = 股权价值 / 总股本
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第五步：三种方法汇总
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+| 估值方法 | 悲观/下限 | 中性 | 乐观/上限 | 当前股价 | 上行空间(中性) |
+|----------|-----------|------|-----------|----------|----------------|
+| PB/PE法 | ？元 | ？元 | ？元 | ？元 | ？% |
+| 股息率法 | ？元 | ？元 | ？元 | ？元 | ？% |
+| DDM/DCF | ？元 | ？元 | ？元 | ？元 | ？% |
+
+基于三种方法的结果，给出综合合理估值区间。
+
+输出要求：
+1. 使用 Markdown 完整输出，保留所有公式“公式→代入→结果”。
+2. 对所有关键数字标注来源（年报页码或外部来源）。
+3. 若外部数据无法确认，明确标注“需手动补充/页码待核实”，不要编造。
+4. 表格请使用标准 Markdown 管道格式，每个单元格保持单行。
+"""
+
+            valuation_raw = await llm.achat([
+                ChatMessage(role="system", content="你是专业卖方分析师，擅长估值锚点分析。请严格按五步输出，并突出可追溯与可计算性。"),
+                ChatMessage(role="user", content=valuation_prompt)
+            ])
+            if hasattr(valuation_raw, "message") and hasattr(valuation_raw.message, "content"):
+                valuation_report = valuation_raw.message.content or ""
+            else:
+                valuation_report = str(valuation_raw or "")
+            if valuation_report.strip():
+                _set_cached_strategy_report(
+                    company_name=company_name,
+                    year=year,
+                    report_type="valuation_anchor_report",
+                    content=valuation_report
+                )
+
+            return {
+                "indicator_extraction": [],
+                "variable_table": [],
+                "correlation_results": [],
+                "strategy_conclusion": {"short_term": "", "long_term": "", "risk_control": "", "key_signals": []},
+                "data_sufficiency": {
+                    "is_sufficient": False,
+                    "reason": "估值锚点模式不执行相关性/因子/聚类结构化分析",
+                    "sample_description": None
+                },
+                "clustering_model": None,
+                "notes": "估值锚点分析模式执行完成",
+                "valuation_anchor_report": valuation_report.strip(),
+                "model_type": "valuation_anchor",
+                "company_name": company_name,
+                "year": year
+            }
 
         # 盈利预测模式：按五步框架直接生成报告，避免进入相关性/因子/聚类结构化链路
         if normalized_model == "earnings_forecast":
@@ -2171,6 +2572,13 @@ Step10: 预测EPS = Step9 / 总股本
                 earnings_report = earnings_raw.message.content or ""
             else:
                 earnings_report = str(earnings_raw or "")
+            if earnings_report.strip():
+                _set_cached_strategy_report(
+                    company_name=company_name,
+                    year=year,
+                    report_type="earnings_forecast_report",
+                    content=earnings_report
+                )
 
             # 调试日志：逐步打印 + 表格结构检查（仅定位问题，不改变业务输出）
             try:

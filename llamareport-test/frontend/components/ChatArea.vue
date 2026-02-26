@@ -46,7 +46,7 @@
                 class="quick-btn profit-forecast" 
                 @click.stop="toggleProfitForecastSubButtons"
                 :disabled="loading"
-                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、盈利预测、综合投资策略'"
+                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、盈利预测、估值锚点分析、综合投资策略'"
               >
                 <span class="btn-icon">📈</span>
                 <span class="btn-text">投资策略</span>
@@ -79,10 +79,16 @@
                 >盈利预测</button>
                 <button 
                   class="quick-btn sub-btn" 
-                  @click="handleQuickAnalysis('profit_forecast', 'all')"
+                  @click="handleQuickAnalysis('profit_forecast', 'valuation_anchor')"
                   :disabled="loading"
-                  title="生成综合投资策略（相关性、聚类、因子分析+综合洞察）"
-                >综合投资策略</button>
+                  title="生成估值锚点分析（PB/PE、股息率、DDM/DCF）"
+                >估值锚点分析</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'comprehensive_strategy')"
+                  :disabled="loading"
+                  title="生成综合投资策略（相关性、聚类、因子分析、盈利预测、估值锚点+综合洞察）"
+                >综合投资策略分析</button>
               </div>
             </div>
           </div>
@@ -507,6 +513,8 @@ export default {
         'clustering': '聚类分析',
         'factor_only': '因子分析',
         'earnings_forecast': '盈利预测',
+        'valuation_anchor': '估值锚点分析',
+        'comprehensive_strategy': '综合投资策略分析',
         'all': '综合投资策略'
       };
       const typeName = (analysisType === 'profit_forecast' && modelType && profitForecastSubMap[modelType])
