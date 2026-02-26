@@ -461,7 +461,7 @@ class ReportAgent:
                 "financial_review": "财务点评",
                 "business_guidance": "业绩指引",
                 "business_highlights": "业务亮点",
-                    "profit_forecast": "投资策略（包含相关性分析、聚类分析和因子分析）"
+                "profit_forecast": "投资策略（包含相关性分析、聚类分析、因子分析和盈利预测）"
             }
             
             section_chinese = section_map.get(section_name, section_name)
@@ -481,115 +481,125 @@ class ReportAgent:
                 )
                 summary_text = None
                 if isinstance(tool_output, dict):
-                    # 优先使用综合洞察
-                    comprehensive_insight = tool_output.get("comprehensive_insight")
-                    if comprehensive_insight:
-                        summary_text = comprehensive_insight
-                    else:
+                    # 盈利预测模式：直接返回完整预测报告
+                    if effective_model_type == "earnings_forecast":
+                        earnings_report = tool_output.get("earnings_forecast_report")
+                        if isinstance(earnings_report, str) and earnings_report.strip():
+                            summary_text = earnings_report.strip()
+                        else:
+                            summary_text = tool_output.get("notes") or ""
+
+                    # 非盈利预测模式：按投资策略结果组装摘要
+                    if effective_model_type != "earnings_forecast":
+                        # 优先使用综合洞察
+                        comprehensive_insight = tool_output.get("comprehensive_insight")
+                        if comprehensive_insight:
+                            summary_text = comprehensive_insight
+                        else:
                         # 如果没有综合洞察，使用策略结论（保持分段格式，便于前端展示）
-                        conclusion = tool_output.get("strategy_conclusion") or {}
-                        parts = []
-                        short_term = conclusion.get("short_term")
-                        long_term = conclusion.get("long_term")
-                        risk_control = conclusion.get("risk_control")
-                        key_signals = conclusion.get("key_signals") or []
-                        if short_term:
-                            parts.append(f"**短期配置：**\n{short_term}")
-                        if long_term:
-                            parts.append(f"**长期配置：**\n{long_term}")
-                        if risk_control:
-                            parts.append(f"**风险管控：**\n{risk_control}")
-                        if isinstance(key_signals, list) and key_signals:
-                            lines = "\n".join(f"- {s}" for s in key_signals if s)
-                            parts.append(f"**关键信号：**\n{lines}")
-                        # 如果有因子分析结果：优先展示完整报告（含数据表、载荷表、方差表、得分表、第四步洞察），否则展示因子+方差+解读摘要
-                        factor_analysis = tool_output.get("factor_analysis") or {}
-                        if factor_analysis:
-                            full_report = factor_analysis.get("full_report")
-                            if isinstance(full_report, str) and full_report.strip():
-                                text = full_report.strip()
-                                # 1. 去掉末尾 JSON 块，不在界面展示
-                                # 1a. 去掉末尾 ```json ... ``` 或 ```\n{...} 代码块
-                                text = re.sub(
-                                    r"\n\s*```\s*json\s*\n[\s\S]*?\"factor_analysis\"[\s\S]*?```\s*$",
-                                    "",
-                                    text,
-                                    count=1,
-                                )
-                                text = re.sub(
-                                    r"\n\s*```\s*\n\s*\{[\s\S]*?\"factor_analysis\"[\s\S]*?\}\s*```\s*$",
-                                    "",
-                                    text,
-                                    count=1,
-                                )
-                                text = text.rstrip()
-                                # 1b. 从最后一次“换行+{”起，若其后为 factor_analysis JSON，则截断
-                                for m in reversed(list(re.finditer(r"\n\s*\{", text))):
-                                    tail = text[m.start() :]
-                                    if '"factor_analysis"' in tail and "factor_data_sufficiency" in tail:
-                                        text = text[: m.start()].rstrip()
-                                        break
-                                # 1c. 若仍以 } 结尾且含 factor_analysis，从最后一个 { 前截断（兜底）
-                                if text.rstrip().endswith("}") and '"factor_analysis"' in text:
-                                    last_open = text.rfind("{")
-                                    if last_open != -1:
-                                        tail = text[last_open:]
-                                        if "factor_data_sufficiency" in tail:
-                                            text = text[:last_open].rstrip()
-                                # 1d. 去掉末尾“JSON输出：”等提示，不在界面展示
-                                text = re.sub(r"\n\s*JSON输出：\s*$", "", text)
-                                text = text.rstrip()
-                                # 2. 四步标题改为简短展示
-                                text = re.sub(r"第一步：构建指标数据矩阵", "构建指标数据矩阵", text)
-                                text = re.sub(r"第二步：执行因子分析", "因子分析", text)
-                                text = re.sub(r"第三步：计算年度因子得分", "因子得分", text)
-                                text = re.sub(r"第四步：生成因子洞察报告", "因子洞察报告", text)
-                                # 3. 删去开场白（兼容：遵循/按照、对XX的指标数据/基于…对XX进行 因子分析）
-                                text = re.sub(
-                                    r"^好的，作为专业投资分析师，我将严格(?:遵循|按照)您要求的四步流程[^。]*因子分析。\s*",
-                                    "",
-                                    text,
-                                    count=1,
-                                )
-                                text = text.strip()
-                                if text:
-                                    parts.append(text)
-                            else:
-                                factors = factor_analysis.get("factors") or []
-                                if isinstance(factors, list) and factors:
-                                    parts.append(f"**因子：**\n" + "、".join(str(f) for f in factors if f))
-                                var_exp = factor_analysis.get("variance_explained") or {}
-                                if isinstance(var_exp, dict) and var_exp:
-                                    var_lines = [f"- {k}：{v}" for k, v in var_exp.items()]
-                                    parts.append(f"**方差解释：**\n" + "\n".join(var_lines))
-                                interp = factor_analysis.get("interpretation")
-                                if isinstance(interp, str) and interp.strip():
-                                    parts.append(f"**解读：**\n{interp.strip()}")
-                        # 如果有聚类分析结果，加入聚类定位、核心发现、风险提示与分组摘要
-                        clustering = tool_output.get("clustering_model") or {}
-                        if clustering:
-                            clustering_conclusion = clustering.get("conclusion") if isinstance(clustering, dict) else None
-                            if isinstance(clustering_conclusion, dict) and clustering_conclusion.get("current_position"):
-                                parts.append(f"**聚类定位：**\n{clustering_conclusion.get('current_position')}")
-                            core_insights = clustering.get("core_insights") or []
-                            if isinstance(core_insights, list) and core_insights:
-                                lines = "\n".join(f"- {s}" for s in core_insights if s)
-                                parts.append(f"**核心发现：**\n{lines}")
-                            risk_notes = clustering.get("risk_notes") or []
-                            if isinstance(risk_notes, list) and risk_notes:
-                                lines = "\n".join(f"- {s}" for s in risk_notes if s)
-                                parts.append(f"**风险提示：**\n{lines}")
-                            clusters = clustering.get("clusters") or []
-                            if isinstance(clusters, list) and clusters:
-                                cluster_lines = []
-                                for c in clusters:
-                                    if isinstance(c, dict):
-                                        name = c.get("name") or "未命名"
-                                        imp = c.get("strategy_implication") or c.get("characteristics") or ""
-                                        cluster_lines.append(f"- **{name}**：{imp}")
-                                if cluster_lines:
-                                    parts.append(f"**聚类分组：**\n" + "\n".join(cluster_lines))
-                        summary_text = "\n\n".join(p for p in parts if p)
+                            conclusion = tool_output.get("strategy_conclusion") or {}
+                            parts = []
+                            short_term = conclusion.get("short_term")
+                            long_term = conclusion.get("long_term")
+                            risk_control = conclusion.get("risk_control")
+                            key_signals = conclusion.get("key_signals") or []
+                            if short_term:
+                                parts.append(f"**短期配置：**\n{short_term}")
+                            if long_term:
+                                parts.append(f"**长期配置：**\n{long_term}")
+                            if risk_control:
+                                parts.append(f"**风险管控：**\n{risk_control}")
+                            if isinstance(key_signals, list) and key_signals:
+                                lines = "\n".join(f"- {s}" for s in key_signals if s)
+                                parts.append(f"**关键信号：**\n{lines}")
+                            # 如果有因子分析结果：优先展示完整报告（含数据表、载荷表、方差表、得分表、第四步洞察），否则展示因子+方差+解读摘要
+                            factor_analysis = tool_output.get("factor_analysis") or {}
+                            if factor_analysis:
+                                full_report = factor_analysis.get("full_report")
+                                if isinstance(full_report, str) and full_report.strip():
+                                    text = full_report.strip()
+                                    # 1. 去掉末尾 JSON 块，不在界面展示
+                                    # 1a. 去掉末尾 ```json ... ``` 或 ```\n{...} 代码块
+                                    text = re.sub(
+                                        r"\n\s*```\s*json\s*\n[\s\S]*?\"factor_analysis\"[\s\S]*?```\s*$",
+                                        "",
+                                        text,
+                                        count=1,
+                                    )
+                                    text = re.sub(
+                                        r"\n\s*```\s*\n\s*\{[\s\S]*?\"factor_analysis\"[\s\S]*?\}\s*```\s*$",
+                                        "",
+                                        text,
+                                        count=1,
+                                    )
+                                    text = text.rstrip()
+                                    # 1b. 从最后一次“换行+{”起，若其后为 factor_analysis JSON，则截断
+                                    for m in reversed(list(re.finditer(r"\n\s*\{", text))):
+                                        tail = text[m.start() :]
+                                        if '"factor_analysis"' in tail and "factor_data_sufficiency" in tail:
+                                            text = text[: m.start()].rstrip()
+                                            break
+                                    # 1c. 若仍以 } 结尾且含 factor_analysis，从最后一个 { 前截断（兜底）
+                                    if text.rstrip().endswith("}") and '"factor_analysis"' in text:
+                                        last_open = text.rfind("{")
+                                        if last_open != -1:
+                                            tail = text[last_open:]
+                                            if "factor_data_sufficiency" in tail:
+                                                text = text[:last_open].rstrip()
+                                    # 1d. 去掉末尾“JSON输出：”等提示，不在界面展示
+                                    text = re.sub(r"\n\s*JSON输出：\s*$", "", text)
+                                    text = text.rstrip()
+                                    # 2. 四步标题改为简短展示
+                                    text = re.sub(r"第一步：构建指标数据矩阵", "构建指标数据矩阵", text)
+                                    text = re.sub(r"第二步：执行因子分析", "因子分析", text)
+                                    text = re.sub(r"第三步：计算年度因子得分", "因子得分", text)
+                                    text = re.sub(r"第四步：生成因子洞察报告", "因子洞察报告", text)
+                                    # 3. 删去开场白（兼容：遵循/按照、对XX的指标数据/基于…对XX进行 因子分析）
+                                    text = re.sub(
+                                        r"^好的，作为专业投资分析师，我将严格(?:遵循|按照)您要求的四步流程[^。]*因子分析。\s*",
+                                        "",
+                                        text,
+                                        count=1,
+                                    )
+                                    text = text.strip()
+                                    if text:
+                                        parts.append(text)
+                                else:
+                                    factors = factor_analysis.get("factors") or []
+                                    if isinstance(factors, list) and factors:
+                                        parts.append(f"**因子：**\n" + "、".join(str(f) for f in factors if f))
+                                    var_exp = factor_analysis.get("variance_explained") or {}
+                                    if isinstance(var_exp, dict) and var_exp:
+                                        var_lines = [f"- {k}：{v}" for k, v in var_exp.items()]
+                                        parts.append(f"**方差解释：**\n" + "\n".join(var_lines))
+                                    interp = factor_analysis.get("interpretation")
+                                    if isinstance(interp, str) and interp.strip():
+                                        parts.append(f"**解读：**\n{interp.strip()}")
+                            # 如果有聚类分析结果，加入聚类定位、核心发现、风险提示与分组摘要
+                            clustering = tool_output.get("clustering_model") or {}
+                            if clustering:
+                                clustering_conclusion = clustering.get("conclusion") if isinstance(clustering, dict) else None
+                                if isinstance(clustering_conclusion, dict) and clustering_conclusion.get("current_position"):
+                                    parts.append(f"**聚类定位：**\n{clustering_conclusion.get('current_position')}")
+                                core_insights = clustering.get("core_insights") or []
+                                if isinstance(core_insights, list) and core_insights:
+                                    lines = "\n".join(f"- {s}" for s in core_insights if s)
+                                    parts.append(f"**核心发现：**\n{lines}")
+                                risk_notes = clustering.get("risk_notes") or []
+                                if isinstance(risk_notes, list) and risk_notes:
+                                    lines = "\n".join(f"- {s}" for s in risk_notes if s)
+                                    parts.append(f"**风险提示：**\n{lines}")
+                                clusters = clustering.get("clusters") or []
+                                if isinstance(clusters, list) and clusters:
+                                    cluster_lines = []
+                                    for c in clusters:
+                                        if isinstance(c, dict):
+                                            name = c.get("name") or "未命名"
+                                            imp = c.get("strategy_implication") or c.get("characteristics") or ""
+                                            cluster_lines.append(f"- **{name}**：{imp}")
+                                    if cluster_lines:
+                                        parts.append(f"**聚类分组：**\n" + "\n".join(cluster_lines))
+                            summary_text = "\n\n".join(p for p in parts if p)
                 return {
                     "status": "success",
                     "section_name": section_name,
@@ -1475,4 +1485,3 @@ class ReportAgent:
                 "completed_tool_calls": len(tool_results) if 'tool_results' in locals() else 0,
                 "tool_calls": tool_results if 'tool_results' in locals() else []
             }
-

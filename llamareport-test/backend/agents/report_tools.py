@@ -1955,6 +1955,8 @@ async def generate_profit_forecast_and_valuation(
             logger.info(f"仅生成因子分析: {company_name} {year}年")
         elif _mt == "correlation_only":
             logger.info(f"仅生成相关性分析: {company_name} {year}年")
+        elif _mt == "earnings_forecast":
+            logger.info(f"仅生成盈利预测: {company_name} {year}年")
         else:
             logger.info(f"开始生成投资策略（相关性分析、聚类分析、因子分析）: {company_name} {year}年")
         
@@ -1983,10 +1985,321 @@ async def generate_profit_forecast_and_valuation(
         
         # 使用 LLM 生成结构化的投资策略
         llm = Settings.llm
-        # 支持: all, correlation, clustering, correlation_only, factor_only（已去掉 regression_only）
+        # 支持: all, correlation, clustering, correlation_only, factor_only, earnings_forecast（已去掉 regression_only）
         normalized_model = (model_type or "all").lower()
-        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "factor_only"}:
+        if normalized_model not in {"correlation", "clustering", "all", "correlation_only", "factor_only", "earnings_forecast"}:
             normalized_model = "all"
+
+        # 盈利预测模式：按五步框架直接生成报告，避免进入相关性/因子/聚类结构化链路
+        if normalized_model == "earnings_forecast":
+            quarterly_query = (
+                f"{company_name} {year}年 季度 季报 单季 营业收入 净利润 EPS "
+                "手续费及佣金净收入 业务及管理费 减值损失 毛利率 净利率"
+            )
+            guidance_query = (
+                f"{company_name} {year}年 年报 管理层讨论与分析 前瞻 指引 展望 "
+                "收入 成本 费用 风险 资产质量 分红 资本补充"
+            )
+            quarterly_data = query_engine.query(quarterly_query)
+            guidance_data = query_engine.query(guidance_query)
+            earnings_data = (
+                f"【公司名称】{company_name}\n"
+                f"【年份】{year}\n"
+                f"【年报表格数据】\n{str(table_data)}\n\n"
+                f"【年报正文数据】\n{str(report_data)}\n\n"
+                f"【历史核心指标数据】\n{str(correlation_data)}\n\n"
+                f"【季度数据（如有）】\n{str(quarterly_data)}\n\n"
+                f"【管理层指引相关文本】\n{str(guidance_data)}"
+            )
+            earnings_prompt = f"""
+你是一位专业的卖方分析师。请基于我上传的【公司名称】年报，完成以下盈利预测模型的搭建。
+
+【公司名称】{company_name}
+【报告年份】{year}
+
+你可以使用以下检索到的原始数据：
+{earnings_data}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第一步：提取历史财务数据
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+请从年报中精确提取以下数据（标注页码），填入表格：
+
+【银行业版本】
+| 项目 | 上年实际 | 本年实际 | 年报页码 |
+|------|----------|----------|----------|
+| 生息资产日均余额 | | | |
+| 利息净收入 | | | |
+| 非利息净收入 | | | |
+|   手续费及佣金净收入 | | | |
+|   其他非利息净收入 | | | |
+| 营业收入 | | | |
+| 业务及管理费 | | | |
+| 减值损失前营业利润(PPOP) | | | |
+| 信用及其他资产减值损失 | | | |
+|   其中：贷款减值 | | | |
+| 税前利润 | | | |
+| 所得税费用 | | | |
+| 归属净利润 | | | |
+| 总股本 | | | |
+| EPS | | | |
+
+【非银行业通用版本】
+| 项目 | 上年实际 | 本年实际 | 年报页码 |
+|------|----------|----------|----------|
+| 营业收入 | | | |
+| 营业成本 | | | |
+| 毛利润 | | | |
+| 销售费用 | | | |
+| 管理费用 | | | |
+| 研发费用 | | | |
+| 财务费用 | | | |
+| 资产减值损失 | | | |
+| 营业利润 | | | |
+| 利润总额 | | | |
+| 所得税费用 | | | |
+| 归属净利润 | | | |
+| 总股本 | | | |
+| EPS | | | |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第二步：计算历史关键比率
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+请基于第一步数据，计算以下比率（写出计算公式和结果）：
+
+【银行业】净息差、生息资产收益率、计息负债付息率、成本收入比、
+信贷成本、有效税率、非息收入占比
+
+【非银行业】毛利率、净利率、三费占比(销售/管理/研发各自占营收比)、
+有效税率、ROE、ROA
+
+同时提取季度数据（如有），计算最近两个季度的边际变化趋势。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第三步：提取管理层前瞻指引
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+请在年报的"管理层讨论与分析"章节中，找到管理层对以下方面的定性表述：
+1. 收入/业务量展望（是否提及"增长""压力""企稳"等关键词）
+2. 成本/费用展望（是否提及"降本增效""投入加大"等）
+3. 风险/资产质量展望（是否提及"改善""承压""可控"等）
+4. 资本/分红展望（是否提及"分红率""资本补充"等）
+
+对每条表述，原文引用并标注页码。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第四步：构建三种情景假设
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+基于历史数据（第一、二步）和管理层指引（第三步），
+对核心驱动变量设定悲观/中性/乐观三种假设值。
+
+假设设定方法论（每个变量必须遵循）：
+(a) 先确认该变量最近2-3年的历史趋势（方向和幅度）
+(b) 再确认最近1-2个季度的边际变化（加速/减速/拐点）
+(c) 再纳入管理层定性指引（对趋势的确认或修正）
+(d) 综合(a)(b)(c)给出三种假设，并写出每个假设的一句话理由
+
+【银行业核心变量】
+| 变量 | 悲观 | 中性 | 乐观 | 假设依据 |
+|------|------|------|------|----------|
+| 净息差(NIM) | | | | |
+| 生息资产增速 | | | | |
+| 非息收入增速 | | | | |
+| 成本收入比 | | | | |
+| 信贷成本 | | | | |
+| 有效税率 | | | | |
+
+【非银行业核心变量】
+| 变量 | 悲观 | 中性 | 乐观 | 假设依据 |
+|------|------|------|------|----------|
+| 营收增速 | | | | |
+| 毛利率 | | | | |
+| 销售费用率 | | | | |
+| 管理费用率 | | | | |
+| 研发费用率 | | | | |
+| 有效税率 | | | | |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+第五步：逐步推导预测利润表
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+用以下公式链，逐行推导三种情景下的预测值。
+每一行必须写出：公式 → 代入数字 → 结果
+
+【银行业推导链】
+Step1: 预测生息资产 = 本年实际 × (1 + 生息资产增速假设)
+Step2: 预测利息净收入 = NIM假设 × Step1
+Step3: 预测非息净收入 = 本年实际 × (1 + 非息增速假设)
+Step4: 预测营业收入 = Step2 + Step3
+Step5: 预测业务管理费 = Step4 × CIR假设
+Step6: 预测PPOP = Step4 - Step5
+Step7: 预测减值损失 = 信贷成本假设 × 预测平均贷款 + 非贷款减值假设
+Step8: 预测税前利润 = Step6 - Step7
+Step9: 预测所得税 = Step8 × 有效税率假设
+Step10: 预测归属净利润 = Step8 - Step9
+Step11: 预测EPS = (Step10 - 优先股息等) / 总股本
+
+【非银行业推导链】
+Step1: 预测营收 = 本年实际 × (1 + 营收增速假设)
+Step2: 预测毛利润 = Step1 × 毛利率假设
+Step3: 预测销售费用 = Step1 × 销售费用率假设
+Step4: 预测管理费用 = Step1 × 管理费用率假设
+Step5: 预测研发费用 = Step1 × 研发费用率假设
+Step6: 预测营业利润 = Step2 - Step3 - Step4 - Step5 - 财务费用等
+Step7: 预测税前利润 ≈ Step6 ± 营业外
+Step8: 预测所得税 = Step7 × 有效税率假设
+Step9: 预测归属净利润 = Step7 - Step8
+Step10: 预测EPS = Step9 / 总股本
+
+最终输出三种情景下的：预测营收、预测净利润、预测EPS、
+营收同比增速、净利润同比增速。
+
+输出格式要求：
+1. 使用 Markdown 输出完整报告。
+2. 缺失值要明确写“未披露/无法确认”，不得编造。
+3. 每个引用尽可能带“年报页码”；若检索信息无页码，请标注“页码待核实”。
+"""
+
+            earnings_raw = await llm.achat([
+                ChatMessage(role="system", content="你是专业卖方分析师，擅长年报盈利预测。请严格按五步输出，优先可追溯与可计算性。"),
+                ChatMessage(role="user", content=earnings_prompt)
+            ])
+            if hasattr(earnings_raw, "message") and hasattr(earnings_raw.message, "content"):
+                earnings_report = earnings_raw.message.content or ""
+            else:
+                earnings_report = str(earnings_raw or "")
+
+            # 调试日志：逐步打印 + 表格结构检查（仅定位问题，不改变业务输出）
+            try:
+                report_text = earnings_report.strip()
+                regex = __import__("re")
+                logger.info("🧪 [earnings_forecast][debug] 报告总长度=%s", len(report_text))
+
+                step_titles = [
+                    "第一步：提取历史财务数据",
+                    "第二步：计算历史关键比率",
+                    "第三步：提取管理层前瞻指引",
+                    "第四步：构建三种情景假设",
+                    "第五步：逐步推导预测利润表",
+                ]
+                positions = []
+                for title in step_titles:
+                    match = regex.search(regex.escape(title), report_text)
+                    if match:
+                        positions.append((title, match.start()))
+                    else:
+                        logger.warning("⚠️ [earnings_forecast][debug] 未找到步骤标题: %s", title)
+                positions.sort(key=lambda item: item[1])
+
+                def _split_pipe_cells(line: str) -> List[str]:
+                    t = (line or "").strip()
+                    if not (t.startswith("|") and t.endswith("|")):
+                        return []
+                    return [cell.strip() for cell in t[1:-1].split("|")]
+
+                def _is_divider(line: str) -> bool:
+                    return bool(regex.match(r"^\|[\s\-:|]+\|$", (line or "").strip()))
+
+                for idx, (title, start) in enumerate(positions):
+                    end = positions[idx + 1][1] if idx + 1 < len(positions) else len(report_text)
+                    section = report_text[start:end].strip()
+                    lines = section.splitlines()
+                    logger.info(
+                        "🧪 [earnings_forecast][debug][%s] 字符数=%s, 行数=%s, 预览=%s",
+                        title,
+                        len(section),
+                        len(lines),
+                        section[:600].replace("\n", "\\n")
+                    )
+
+                    # 表格结构检查：检测每个 markdown 表的列数一致性
+                    i = 0
+                    table_index = 0
+                    while i < len(lines):
+                        header = (lines[i] or "").strip()
+                        divider = (lines[i + 1] or "").strip() if i + 1 < len(lines) else ""
+                        if header.startswith("|") and header.endswith("|") and _is_divider(divider):
+                            table_index += 1
+                            header_cells = _split_pipe_cells(header)
+                            expected_cols = len(header_cells)
+                            logger.info(
+                                "🧪 [earnings_forecast][debug][%s][表%s] 表头列数=%s, 表头=%s",
+                                title,
+                                table_index,
+                                expected_cols,
+                                header[:240]
+                            )
+                            i += 2
+                            row_no = 0
+                            while i < len(lines):
+                                row_line = (lines[i] or "").strip()
+                                if not row_line:
+                                    i += 1
+                                    continue
+                                if not (row_line.startswith("|") and row_line.endswith("|")):
+                                    # 非管道行可能是“断行补尾”，重点打印
+                                    logger.warning(
+                                        "⚠️ [earnings_forecast][debug][%s][表%s] 遇到非表格行(疑似断行): %s",
+                                        title,
+                                        table_index,
+                                        row_line[:240]
+                                    )
+                                    break
+                                row_no += 1
+                                row_cells = _split_pipe_cells(row_line)
+                                cell_count = len(row_cells)
+                                if cell_count != expected_cols:
+                                    logger.warning(
+                                        "⚠️ [earnings_forecast][debug][%s][表%s][行%s] 列数不一致: 期望=%s, 实际=%s, 内容=%s",
+                                        title,
+                                        table_index,
+                                        row_no,
+                                        expected_cols,
+                                        cell_count,
+                                        row_line[:240]
+                                    )
+                                else:
+                                    logger.info(
+                                        "🧪 [earnings_forecast][debug][%s][表%s][行%s] 列数正常=%s",
+                                        title,
+                                        table_index,
+                                        row_no,
+                                        cell_count
+                                    )
+                                if regex.search(r"\d{1,3},\d{3}", row_line):
+                                    logger.warning(
+                                        "⚠️ [earnings_forecast][debug][%s][表%s][行%s] 检测到千分位逗号，可能影响渲染: %s",
+                                        title,
+                                        table_index,
+                                        row_no,
+                                        row_line[:240]
+                                    )
+                                i += 1
+                            continue
+                        i += 1
+            except Exception as debug_err:
+                logger.warning("⚠️ [earnings_forecast][debug] 调试日志生成失败: %s", str(debug_err))
+
+            return {
+                "indicator_extraction": [],
+                "variable_table": [],
+                "correlation_results": [],
+                "strategy_conclusion": {"short_term": "", "long_term": "", "risk_control": "", "key_signals": []},
+                "data_sufficiency": {
+                    "is_sufficient": False,
+                    "reason": "盈利预测模式不执行相关性/因子/聚类结构化分析",
+                    "sample_description": None
+                },
+                "clustering_model": None,
+                "notes": "盈利预测模式执行完成",
+                "earnings_forecast_report": earnings_report.strip(),
+                "model_type": "earnings_forecast",
+                "company_name": company_name,
+                "year": year
+            }
 
         # 仅聚类模式：跳过指标抽取与相关性/因子，只执行聚类
         if normalized_model == "clustering":
@@ -2790,4 +3103,3 @@ async def generate_profit_forecast_and_valuation(
             "company_name": company_name,
             "year": year
         }
-

@@ -46,7 +46,7 @@
                 class="quick-btn profit-forecast" 
                 @click.stop="toggleProfitForecastSubButtons"
                 :disabled="loading"
-                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、综合投资策略'"
+                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、盈利预测、综合投资策略'"
               >
                 <span class="btn-icon">📈</span>
                 <span class="btn-text">投资策略</span>
@@ -71,6 +71,12 @@
                   :disabled="loading"
                   title="仅生成因子分析"
                 >因子分析</button>
+                <button 
+                  class="quick-btn sub-btn" 
+                  @click="handleQuickAnalysis('profit_forecast', 'earnings_forecast')"
+                  :disabled="loading"
+                  title="生成盈利预测（三情景）"
+                >盈利预测</button>
                 <button 
                   class="quick-btn sub-btn" 
                   @click="handleQuickAnalysis('profit_forecast', 'all')"
@@ -196,8 +202,27 @@ export default {
     parseMarkdown(text) {
       if (text == null) return '';
       const raw = typeof text === 'string' ? text : String(text);
-      // 1. 按 1/2/3 点换行：在“空格+数字+.”前插入换行，使 1. 2. 3. 各占一行
-      let out = raw.replace(/\s+(\d+)\./g, '\n$1.');
+      // 先规范化表格，避免“竖排/断行”导致列错位
+      let out = raw;
+      try {
+        const hasMarkdownTable = /\|[^\n]+\|\s*\n\s*\|[\s\-:|]+\|/m.test(raw);
+        out = hasMarkdownTable ? this.normalizeFactorTables(raw) : raw;
+      } catch (error) {
+        console.error('❌ [ChatArea] normalizeFactorTables failed:', error);
+        out = raw;
+      }
+      // 去掉会触发代码块渲染的多余缩进（保留普通段落），避免黑白代码条
+      out = out.split('\n').map((line) => {
+        if (/^\s{4,}(\*|-|\d+\.)\s+/.test(line)) return line.replace(/^\s{4,}/, '');
+        return line;
+      }).join('\n');
+      // 1. 仅处理“行首编号列表”，避免误伤表格中的小数（如 398.2 / 2.05）
+      out = out.split('\n').map((line) => {
+        const trimmed = line.trim();
+        // Markdown 表格行跳过
+        if (trimmed.startsWith('|') && trimmed.endsWith('|')) return line;
+        return line.replace(/^(\s*)(\d+)\.\s+/g, '$1$2. ');
+      }).join('\n');
       // 2. 按中文序号换行：在“一、”“二、”“三、”等前插入换行（非行首时）
       out = out.replace(/([^\n])([一二三四五六七八九十]+、)/g, '$1\n$2');
       // 按加粗小节标题换行
@@ -216,6 +241,7 @@ export default {
     normalizeFactorTables(text) {
       if (!text || typeof text !== 'string') return text;
       let out = text;
+      const tableHeaderLike = /年份|项目|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本收入比|信贷成本|有效税率|营收|净利润|EPS/;
       // 1. 制表符行 -> 管道表格行
       out = out.split('\n').map(line => {
         if (line.indexOf('\t') === -1) return line;
@@ -223,19 +249,7 @@ export default {
         return '| ' + cells.join(' | ') + ' |';
       }).join('\n');
 
-      // 1a. 无管道表头转管道：如 "年份  因子1  因子2"，便于后续竖排合并
-      const headerLike = /年份|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本|资本|综合/;
-      out = out.split('\n').map(line => {
-        const t = line.trim();
-        if (t.startsWith('|') && t.endsWith('|')) return line;
-        if (headerLike.test(t)) {
-          const cells = t.split(/\t+/).map(c => c.trim()).filter(Boolean);
-          if (cells.length >= 2) return '| ' + cells.join(' | ') + ' |';
-          const spaceCells = t.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
-          if (spaceCells.length >= 2) return '| ' + spaceCells.join(' | ') + ' |';
-        }
-        return line;
-      }).join('\n');
+      // 注意：不再把普通文本行自动转为表格行，避免误伤“资本/分红展望”“主要风险”等正文。
 
       // 1b. 合并“单列竖排”：每行只有第一个单元格非空（或整行只有一个非空）的连续 N 行 -> 一行 N 列（N=最近表头列数）
       out = this.collapseSingleCellPipeRows(out);
@@ -274,7 +288,7 @@ export default {
       out = out.replace(
         /(^\|[^\n]+\|)\s*\n(\s*)(^\|[^\n]+\|)/gm,
         (m, header, mid, dataRow) => {
-          if (!headerLike.test(header)) return m;
+          if (!tableHeaderLike.test(header)) return m;
           if (/^\|[\s\-:|]+\|$/.test(header.trim())) return m;
           if (/^\|[\s\-:|]+\|$/.test(dataRow.trim())) return m;
           const colCount = (header.match(/\|/g) || []).length - 1;
@@ -349,6 +363,17 @@ export default {
           result.push('| ' + rawCellBuffer.join(' | ') + ' |');
         } else rawCellBuffer.forEach(l => result.push(l));
         rawCellBuffer = [];
+      }
+      function flushTransposeBuffer() {
+        if (!transposeBuffer.length) return;
+        // 将“单列表头 + 多个单值行”合并为一行多列，避免竖排错位
+        if (transposeBuffer.length >= 2) {
+          result.push('| ' + transposeBuffer.join(' | ') + ' |');
+        } else {
+          result.push(transposeBuffer[0]);
+        }
+        transposeBuffer = [];
+        if (colCount === 1) colCount = 0;
       }
 
       for (let i = 0; i < lines.length; i++) {
@@ -481,6 +506,7 @@ export default {
         'correlation_only': '相关性分析',
         'clustering': '聚类分析',
         'factor_only': '因子分析',
+        'earnings_forecast': '盈利预测',
         'all': '综合投资策略'
       };
       const typeName = (analysisType === 'profit_forecast' && modelType && profitForecastSubMap[modelType])
@@ -608,4 +634,3 @@ export default {
   }
 }
 </script>
-

@@ -125,7 +125,7 @@ class GenerateSectionRequest(BaseModel):
     year: str = Field(description="年份")
     model_type: Optional[str] = Field(
         default=None,
-        description="投资策略模型类型: all（综合）、correlation_only（仅相关性）、clustering（仅聚类）、factor_only（仅因子分析）"
+        description="投资策略模型类型: all（综合）、correlation_only（仅相关性）、clustering（仅聚类）、factor_only（仅因子分析）、earnings_forecast（盈利预测）"
     )
 
 
@@ -573,4 +573,3 @@ async def health_check():
         "service": "agent-api",
         "version": "1.0.0"
     })
-
