@@ -299,7 +299,8 @@ export default {
   name: 'AgentAnalysisPage',
   props: {
     onBack: { type: Function, required: true },
-    onQuery: { type: Function, required: true }
+    onQuery: { type: Function, required: true },
+    onAddVisualizationCards: { type: Function, default: null }
   },
   data() {
     return {
@@ -1417,17 +1418,41 @@ export default {
                   }
                 }
                 
-                // 生成可视化视图
+                // 生成可视化视图（与洞察同时生成），以卡片形式放入可视化视图界面
+                const cardInsights = toolOutput.card_insights || {}
+                const buildCardInsight = (summary) => {
+                  if (summary && typeof summary === 'string' && summary.trim()) {
+                    return [{ insight_type: 'trend', description: summary.trim() }]
+                  }
+                  return []
+                }
                 // 1. 相关性分析可视化
-                if (toolOutput.correlation_results && Array.isArray(toolOutput.correlation_results) && toolOutput.correlation_results.length > 0) {
-                  const correlationData = toolOutput.correlation_results
-                  const labels = correlationData.map(r => `${r.target_metric} vs ${r.driver_metric}`)
-                  const correlations = correlationData.map(r => r.correlation || 0)
-                  
-                  this.visualizations.push({
+                let correlationCard = null
+                if (toolOutput.correlation_visualization && toolOutput.correlation_visualization.has_visualization) {
+                  correlationCard = {
                     id: `investment-strategy-correlation-${Date.now()}`,
                     question: '相关性分析结果',
                     source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'chart',
+                    data: {
+                      has_visualization: true,
+                      visualization_type: toolOutput.correlation_visualization.visualization_type || 'plotly',
+                      chart_config: toolOutput.correlation_visualization.chart_config,
+                      insights: buildCardInsight(cardInsights.correlation_summary)
+                    }
+                  }
+                  this.visualizations.push(correlationCard)
+                } else if (toolOutput.correlation_results && Array.isArray(toolOutput.correlation_results) && toolOutput.correlation_results.length > 0) {
+                  const correlationData = toolOutput.correlation_results
+                  const labels = correlationData.map(r => `${r.target_metric} vs ${r.driver_metric}`)
+                  const correlations = correlationData.map(r => r.correlation || 0)
+                  correlationCard = {
+                    id: `investment-strategy-correlation-${Date.now()}`,
+                    question: '相关性分析结果',
+                    source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'chart',
                     data: {
                       has_visualization: true,
                       visualization_type: 'plotly',
@@ -1448,22 +1473,26 @@ export default {
                           yaxis_title: '相关系数',
                           yaxis: { range: [-1, 1] }
                         }
-                      }
+                      },
+                      insights: buildCardInsight(cardInsights.correlation_summary)
                     }
-                  })
+                  }
+                  this.visualizations.push(correlationCard)
                 }
                 
                 // 2. 因子分析可视化
+                let factorCard = null
                 if (toolOutput.factor_analysis && toolOutput.factor_analysis.factors && toolOutput.factor_analysis.factors.length > 0) {
                   const factorAnalysis = toolOutput.factor_analysis
                   const factors = factorAnalysis.factors || []
                   const varianceExplained = factorAnalysis.variance_explained || {}
                   const varianceValues = factors.map(f => varianceExplained[f] || 0)
-                  
-                  this.visualizations.push({
+                  factorCard = {
                     id: `investment-strategy-factor-${Date.now()}`,
                     question: '因子分析结果',
                     source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'chart',
                     data: {
                       has_visualization: true,
                       visualization_type: 'plotly',
@@ -1482,21 +1511,25 @@ export default {
                           yaxis_title: '解释方差比例',
                           yaxis: { tickformat: '.1%' }
                         }
-                      }
+                      },
+                      insights: buildCardInsight(cardInsights.factor_summary)
                     }
-                  })
+                  }
+                  this.visualizations.push(factorCard)
                 }
                 
                 // 4. 聚类分析可视化（如果存在）
+                let clusteringCard = null
                 if (toolOutput.clustering_model && toolOutput.clustering_model.group_results) {
                   const clustering = toolOutput.clustering_model
                   const groups = clustering.group_results || []
                   const groupNames = groups.map(g => g.group_name || '未知组')
-                  
-                  this.visualizations.push({
+                  clusteringCard = {
                     id: `investment-strategy-clustering-${Date.now()}`,
                     question: '聚类分析结果',
                     source: 'investment_strategy',
+                    timestamp: new Date(),
+                    type: 'chart',
                     data: {
                       has_visualization: true,
                       visualization_type: 'plotly',
@@ -1514,9 +1547,15 @@ export default {
                           xaxis_title: '分组',
                           yaxis_title: '组别编号'
                         }
-                      }
+                      },
+                      insights: buildCardInsight(cardInsights.clustering_summary)
                     }
-                  })
+                  }
+                  this.visualizations.push(clusteringCard)
+                }
+                const cardsToSync = [correlationCard, factorCard, clusteringCard].filter(Boolean)
+                if (cardsToSync.length > 0 && typeof this.onAddVisualizationCards === 'function') {
+                  this.onAddVisualizationCards(cardsToSync)
                 }
               }
             })
@@ -1665,7 +1704,13 @@ export default {
       if (typeof text !== 'string') {
         text = String(text)
       }
-      
+      // 表格规范化：修复因子分析等报告里“表头+竖排数据”或制表符导致的表格错位（与 ChatArea 一致）
+      text = this.normalizeFactorTables(text)
+      // 加粗/样式规范化：** 与文字间空格（含全角、不间断空格）、单星号小节/因子改为双星号；单星号斜体去空格
+      text = text.replace(/\*\*[\s\u3000\u00a0]+/g, '**').replace(/[\s\u3000\u00a0]+(\*\*)/g, '$1')
+      text = text.replace(/\*([一二三四五六七八九十]+、)\*/g, '**$1**')
+      text = text.replace(/\*(因子\d+[^*\n]*?)\*/g, '**$1**')
+      text = text.replace(/(?<!\*)\*[\s\u3000\u00a0]+/g, '*').replace(/[\s\u3000\u00a0]+\*(?!\*)/g, '*')
       // 使用 marked 解析
       if (typeof marked !== 'undefined' && marked && marked.parse) {
         try {
@@ -1679,6 +1724,185 @@ export default {
         // 如果 marked 不可用，返回转义后的文本
         return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
       }
+    },
+    /** 与 ChatArea 一致：规范化因子分析等报告中的表格，便于 Markdown 正确渲染 */
+    normalizeFactorTables(text) {
+      if (!text || typeof text !== 'string') return text
+      let out = text
+      out = out.split('\n').map(line => {
+        if (line.indexOf('\t') === -1) return line
+        const cells = line.split('\t').map(c => c.trim())
+        return '| ' + cells.join(' | ') + ' |'
+      }).join('\n')
+      out = this.collapseSingleCellPipeRows(out)
+      out = out.replace(
+        /(?:^\|\s*)?(因子\d+：[^\n|]+?)\s*\|?\s*\n\s*([\d.]+)\s*\n\s*([\d.]+%)\s*\n\s*([\d.]+%)/gm,
+        (_, name, v1, v2, v3) => `| ${name.trim()} | ${v1} | ${v2} | ${v3} |`
+      )
+      for (let cols = 10; cols >= 5; cols--) {
+        const numPart = Array(cols).fill('([-\\d.]+)').join('\\s*\\n\\s*')
+        const re = new RegExp('(?:^\\|\\s*)?(\\d{4})\\s*\\|?\\s*\\n\\s*' + numPart, 'gm')
+        out = out.replace(re, (m, year, ...vals) => '| ' + year + ' | ' + vals.slice(0, cols).join(' | ') + ' |')
+      }
+      out = out.replace(
+        /(?:^\|\s*)?(\d{4})\s*\|?\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)/gm,
+        (_, year, s1, s2, s3) => `| ${year} | ${s1} | ${s2} | ${s3} |`
+      )
+      out = out.replace(
+        /(?:^\|\s*)?([^\n|]{1,30}?)\s*\|?\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)(?:\s*\n\s*([-\d.]+))?/gm,
+        (m, name, n1, n2, n3, n4) => {
+          const nameTrim = name.trim()
+          if (!nameTrim || /^[\d.]+$/.test(nameTrim)) return m
+          if (/[。，、]/.test(nameTrim) || nameTrim.length > 25) return m
+          if (n4 !== undefined) return `| ${nameTrim} | ${n1} | ${n2} | ${n3} | ${n4} |`
+          return `| ${nameTrim} | ${n1} | ${n2} | ${n3} |`
+        }
+      )
+      const headerLike = /年份|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本|资本/
+      out = out.replace(
+        /(^\|[^\n]+\|)\s*\n(\s*)(^\|[^\n]+\|)/gm,
+        (m, header, mid, dataRow) => {
+          if (!headerLike.test(header)) return m
+          if (/^\|[\s\-:|]+\|$/.test(header.trim())) return m
+          if (/^\|[\s\-:|]+\|$/.test(dataRow.trim())) return m
+          const colCount = (header.match(/\|/g) || []).length - 1
+          if (colCount < 2) return m
+          const sep = '|' + Array(colCount).fill('---').join('|') + '|'
+          return header + '\n' + sep + '\n' + mid + dataRow
+        }
+      )
+      return out
+    },
+    collapseSingleCellPipeRows(text) {
+      const headerLike = /年份|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本|资本|平均|信贷/
+      const lines = text.split('\n')
+      const result = []
+      let buffer = []
+      let colCount = 0
+      let rowPrefix = []
+      let needRest = 0
+      let rawCellBuffer = []
+      function isPipeLine(line) {
+        const t = line.trim()
+        return t.startsWith('|') && t.endsWith('|')
+      }
+      function isSeparatorLine(line) {
+        const t = line.trim()
+        return /^\|[\s\-:|]+\|$/.test(t)
+      }
+      function isHeaderLike(line) {
+        return headerLike.test(line) && !isSeparatorLine(line)
+      }
+      function singleCellValue(line) {
+        const cells = line.split('|').map(c => c.trim()).filter(c => c.length > 0)
+        return cells.length === 1 ? cells[0] : null
+      }
+      function firstTwoCells(line) {
+        const cells = line.split('|').map(c => c.trim())
+        const nonEmpty = cells.filter(c => c.length > 0)
+        return nonEmpty.length === 2 ? nonEmpty : null
+      }
+      function isRawCellLine(line) {
+        const t = line.trim()
+        return t.length > 0 && !t.startsWith('|') && (/^\d{4}$/.test(t) || /^-?[\d.]+%?$/.test(t))
+      }
+      function flushBuffer() {
+        if (colCount >= 2 && buffer.length === colCount) {
+          const vals = buffer.map(ln => singleCellValue(ln))
+          if (vals.every(v => v !== null)) result.push('| ' + vals.join(' | ') + ' |')
+          else buffer.forEach(l => result.push(l))
+        } else buffer.forEach(l => result.push(l))
+        buffer = []
+      }
+      function flushRowPrefix() {
+        if (rowPrefix.length > 0) {
+          result.push('| ' + rowPrefix.join(' | ') + ' |')
+          rowPrefix = []
+          needRest = 0
+        }
+      }
+      function flushRawCellBuffer() {
+        if (colCount >= 2 && rawCellBuffer.length === colCount) {
+          result.push('| ' + rawCellBuffer.join(' | ') + ' |')
+        } else rawCellBuffer.forEach(l => result.push(l))
+        rawCellBuffer = []
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        if (!isPipeLine(line)) {
+          flushBuffer()
+          flushRowPrefix()
+          if (isRawCellLine(line) && colCount >= 2) {
+            rawCellBuffer.push(line.trim())
+            if (rawCellBuffer.length === colCount) {
+              result.push('| ' + rawCellBuffer.join(' | ') + ' |')
+              rawCellBuffer = []
+            }
+          } else {
+            flushRawCellBuffer()
+            colCount = 0
+            result.push(line)
+          }
+          continue
+        }
+        if (isSeparatorLine(line)) {
+          flushBuffer()
+          flushRowPrefix()
+          flushRawCellBuffer()
+          result.push(line)
+          continue
+        }
+        const twoCell = firstTwoCells(line)
+        const single = singleCellValue(line) !== null
+        if (isHeaderLike(line)) {
+          flushBuffer()
+          flushRowPrefix()
+          flushRawCellBuffer()
+          const n = (line.match(/\|/g) || []).length - 1
+          if (n >= 2) colCount = n
+          result.push(line)
+          continue
+        }
+        if (twoCell !== null && colCount >= 2) {
+          flushBuffer()
+          const rest = colCount - 2
+          if (rest <= 0) {
+            result.push(line)
+            continue
+          }
+          rowPrefix = [...twoCell]
+          needRest = rest
+          continue
+        }
+        if (single && needRest > 0) {
+          rowPrefix.push(singleCellValue(line))
+          needRest--
+          if (needRest === 0) {
+            result.push('| ' + rowPrefix.join(' | ') + ' |')
+            rowPrefix = []
+          }
+          continue
+        }
+        if (single && colCount >= 2) {
+          flushRowPrefix()
+          buffer.push(line)
+          if (buffer.length === colCount) {
+            const vals = buffer.map(ln => singleCellValue(ln))
+            if (vals.every(v => v !== null)) result.push('| ' + vals.join(' | ') + ' |')
+            else buffer.forEach(l => result.push(l))
+            buffer = []
+          }
+          continue
+        }
+        flushBuffer()
+        flushRowPrefix()
+        colCount = 0
+        result.push(line)
+      }
+      flushBuffer()
+      flushRowPrefix()
+      flushRawCellBuffer()
+      return result.join('\n')
     },
     removeVisualization(index) {
       const resolvedIndex = typeof index === 'number'
@@ -1749,6 +1973,13 @@ export default {
               plotlyTrace.r = trace.r || []
               plotlyTrace.theta = trace.theta || []
               plotlyTrace.fill = trace.fill
+            } else if (trace.type === 'heatmap') {
+              plotlyTrace.z = trace.z || []
+              plotlyTrace.x = trace.x || []
+              plotlyTrace.y = trace.y || []
+              if (trace.colorscale) plotlyTrace.colorscale = trace.colorscale
+              if (trace.zmin != null) plotlyTrace.zmin = trace.zmin
+              if (trace.zmax != null) plotlyTrace.zmax = trace.zmax
             } else {
               plotlyTrace.x = trace.x || []
               plotlyTrace.y = trace.y || []
@@ -1775,7 +2006,7 @@ export default {
               title: chartConfig.layout.yaxis_title || '', 
               gridcolor: '#e0e0e0' 
             },
-            height: 400,
+            height: chartConfig.layout.height || 400,
             template: chartConfig.layout.template || 'plotly_white',
             hovermode: chartConfig.layout.hovermode || 'closest',
             showlegend: chartConfig.layout.showlegend !== false,

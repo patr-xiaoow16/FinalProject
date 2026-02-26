@@ -2146,6 +2146,24 @@ body {
     margin: 2px 0 6px;
 }
 
+/* 投资策略卡片（右侧可视化面板）统一留白与标题层级 */
+.viz-card[class*="investment-strategy"] .viz-card-content,
+.viz-card .viz-card-content:has(.chart-container-inline) {
+    padding: 12px 14px;
+}
+.viz-card .insights-box,
+.viz-card .data-insights {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #eef2f7;
+}
+.viz-card .insights-box h3,
+.viz-card .data-insights-header {
+    font-size: 0.85rem;
+    color: #475569;
+    margin-bottom: 8px;
+}
+
 .chart-header-inline {
     display: flex;
     align-items: center;
@@ -2499,6 +2517,11 @@ body {
 .message-content p {
     margin-bottom: 4px;
     line-height: 1.3;
+}
+
+.message-content strong {
+    font-weight: 700;
+    color: #1f2937;
 }
 
 .message-content code {

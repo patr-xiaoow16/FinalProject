@@ -4,6 +4,7 @@
 """
 
 import logging
+import re
 from typing import Dict, Any, List, Optional, Annotated
 from llama_index.core.tools import FunctionTool, QueryEngineTool
 from llama_index.core import Settings
@@ -21,6 +22,41 @@ from agents.visualization_agent import generate_visualization_for_query
 # 相关性、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_factor_analysis（多元回归已移除）
 
 logger = logging.getLogger(__name__)
+
+
+async def _generate_card_insight(llm: Any, context: str, card_type: str) -> str:
+    """
+    用 LLM 二次生成可视化卡片的数据洞察，限制字数（非截断）。
+    context: 已有分析结论或数据摘要
+    card_type: 如 "相关性分析"、"因子分析"、"聚类分析"
+    返回不超过 80 字的概括文本。
+    """
+    if not (context and str(context).strip()):
+        return ""
+    import re
+    prompt = f"""以下为{card_type}的分析结论或数据摘要。请用1至2句话概括其核心要点，用于展示在可视化卡片下方。
+**严格要求**：总字数不超过80字。请直接生成80字以内的完整句子，不要先写长文再截断，不要使用省略号。
+直接输出概括文本，不要标题、不要编号、不要引号、不要「概括：」等前缀。
+
+内容摘要：
+{str(context).strip()[:2000]}
+"""
+    try:
+        resp = await llm.achat([
+            ChatMessage(role="system", content="你是投资分析师助手。按要求输出简短概括，严格控制在80字以内。"),
+            ChatMessage(role="user", content=prompt)
+        ])
+        content = resp.message.content if hasattr(resp, "message") and hasattr(resp.message, "content") else str(resp)
+        text = (content or "").strip()
+        text = re.sub(r"^[概括：\s]+", "", text)
+        text = re.sub(r"^[\"']|[\"']$", "", text)
+        # 不截断：要求 LLM 在 80 字内完成；若仍超长仅做安全截断（100 字）
+        if len(text) > 100:
+            text = text[:97] + "…"
+        return text.strip()
+    except Exception as e:
+        logger.warning(f"卡片洞察生成失败 ({card_type}): {e}")
+        return ""
 
 
 def _create_default_financial_review(
@@ -1785,12 +1821,23 @@ ROE、ROA、净利润率/净息差（银行）、毛利率（制造业）
 | 因子 | 特征值 | 方差贡献率 | 累计贡献率 |
 要求：累计贡献率≥80%；对因子重要性排序。
 
+【表格格式强制要求】所有数据表必须使用 Markdown 管道表格格式，且每行表格数据必须在一行内写完，禁止将同一行的多个单元格拆成多行。示例（方差贡献分析正确写法）：
+| 因子 | 特征值 | 方差贡献率 | 累计贡献率 |
+|------|--------|------------|------------|
+| 因子1：盈利与风险因子 | 4.94 | 70.6% | 70.6% |
+| 因子2：资本与成本因子 | 2.06 | 29.4% | 100.0% |
+禁止使用制表符或“表头一行、数据每个单元格单独一行”的错位格式，否则前端无法正确渲染。
+
 ============================
 第三步：计算年度因子得分
 ============================
 计算各年因子得分（标准化），构建综合得分（加权平均）：
 综合得分 = Σ(因子得分 × 方差贡献率权重)
-输出：| 年份 | 因子1得分 | 因子2得分 | 因子3得分 | 综合得分 |
+输出表格格式（每行一行，管道表格）：
+| 年份 | 因子1得分 | 因子2得分 | 因子3得分 | 综合得分 |
+|------|----------|----------|----------|----------|
+| 2022 | x.xx | x.xx | x.xx | x.xx |
+| 2023 | ... | ... | ... | ... |
 
 ============================
 第四步：生成因子洞察报告
@@ -2254,6 +2301,7 @@ async def generate_profit_forecast_and_valuation(
 
         # 自动执行：相关性分析、聚类、因子分析（支持单模块：correlation_only, factor_only；已去掉多元回归）
         if isinstance(result_dict, dict):
+            result_dict.setdefault("card_insights", {})
             # 1. 相关性分析
             if normalized_model in {"correlation", "all", "correlation_only"}:
                 correlation_results = result_dict.get("correlation_results") or []
@@ -2352,6 +2400,63 @@ async def generate_profit_forecast_and_valuation(
                                 result_dict["notes"] = parsed.get("notes")
                     except Exception as insight_error:
                         logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 洞察生成失败: {str(insight_error)}")
+
+                # 与洞察同时生成相关性分析可视化视图（供前端以卡片形式展示在可视化视图界面）
+                corr_results = result_dict.get("correlation_results") or []
+                if corr_results:
+                    try:
+                        metrics_ordered = []
+                        seen = set()
+                        for r in corr_results:
+                            for m in (r.get("target_metric"), r.get("driver_metric")):
+                                if m and m not in seen:
+                                    seen.add(m)
+                                    metrics_ordered.append(m)
+                        n = len(metrics_ordered)
+                        metric_to_idx = {m: i for i, m in enumerate(metrics_ordered)}
+                        z_matrix = [[None] * n for _ in range(n)]
+                        for r in corr_results:
+                            t = r.get("target_metric")
+                            d = r.get("driver_metric")
+                            c = r.get("correlation")
+                            if t is None or d is None or c is None:
+                                continue
+                            i = metric_to_idx.get(t)
+                            j = metric_to_idx.get(d)
+                            if i is not None and j is not None:
+                                z_matrix[i][j] = round(float(c), 3)
+                                z_matrix[j][i] = round(float(c), 3)
+                        for i in range(n):
+                            if z_matrix[i][i] is None:
+                                z_matrix[i][i] = 1.0
+                        result_dict["correlation_visualization"] = {
+                            "has_visualization": True,
+                            "visualization_type": "plotly",
+                            "chart_config": {
+                                "chart_type": "heatmap",
+                                "traces": [
+                                    {
+                                        "type": "heatmap",
+                                        "z": z_matrix,
+                                        "x": metrics_ordered,
+                                        "y": metrics_ordered,
+                                        "colorscale": [[0, "#ef4444"], [0.5, "#fbbf24"], [1, "#10b981"]],
+                                        "zmin": -1,
+                                        "zmax": 1
+                                    }
+                                ],
+                                "layout": {
+                                    "title": "相关性分析热力图",
+                                    "xaxis_title": "",
+                                    "yaxis_title": "",
+                                    "height": 420
+                                }
+                            }
+                        }
+                        logger.info("✅ 相关性分析可视化视图已生成")
+                    except Exception as viz_err:
+                        logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 相关性可视化构建失败: {str(viz_err)}")
+
             else:
                 result_dict["correlation_results"] = []
                 result_dict["strategy_conclusion"] = {
@@ -2480,6 +2585,70 @@ async def generate_profit_forecast_and_valuation(
                             result_dict["clustering_model"] = clustering_model
                 except Exception as clustering_error:
                     logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 聚类模型生成失败: {str(clustering_error)}")
+            
+            # 为可视化卡片生成数据洞察（LLM 二次生成，每条 80 字以内完整句，不截断）
+            has_correlation = bool(result_dict.get("correlation_results") or result_dict.get("correlation_visualization"))
+            has_factor = bool(result_dict.get("factor_analysis") and (result_dict.get("factor_analysis") or {}).get("factors"))
+            has_clustering = bool(result_dict.get("clustering_model"))
+            import json as _json
+            card_insights = {
+                "correlation_summary": "",
+                "factor_summary": "",
+                "clustering_summary": "",
+            }
+            if has_correlation or has_factor or has_clustering:
+                try:
+                    card_insight_prompt = f"""你是专业投资分析师。请根据下方「数据」中已有的分析结果，为前端可视化卡片生成数据洞察。
+
+要求：
+1. 每条洞察**严格控制在 80 字以内**，由你**直接生成**符合字数的完整句子，**禁止先写长文再截断、禁止使用省略号**。
+2. 仅根据给出的数据撰写，不要编造数字。
+3. 若某部分无数据，对应字段输出空字符串 ""。
+
+输出**唯一**一个 JSON 对象，不要 markdown 代码块或其它说明：
+{{"correlation_summary": "…", "factor_summary": "…", "clustering_summary": "…"}}
+
+数据：
+"""
+                    if has_correlation:
+                        card_insight_prompt += f"\n【相关性】\n{_json.dumps(result_dict.get('correlation_results') or [], ensure_ascii=False)}\n策略结论摘要：{_json.dumps(result_dict.get('strategy_conclusion') or {}, ensure_ascii=False)}\n"
+                    if has_factor:
+                        card_insight_prompt += f"\n【因子分析】\n{_json.dumps(result_dict.get('factor_analysis') or {}, ensure_ascii=False)}\n"
+                    if has_clustering:
+                        card_insight_prompt += f"\n【聚类分析】\n{_json.dumps(result_dict.get('clustering_model') or {}, ensure_ascii=False)}\n"
+                    card_insight_prompt += "\n请直接输出上述 JSON，且每条 summary 为 80 字以内的完整句，禁止截断或省略号。"
+                    card_response = await llm.achat([
+                        ChatMessage(role="system", content="你只输出一个 JSON 对象，包含 correlation_summary、factor_summary、clustering_summary。每条 80 字以内完整句，禁止截断或省略号。"),
+                        ChatMessage(role="user", content=card_insight_prompt)
+                    ])
+                    if hasattr(card_response, 'message'):
+                        card_content = card_response.message.content if hasattr(card_response.message, 'content') else str(card_response.message)
+                    else:
+                        card_content = str(card_response)
+                    _json_match = re.search(r'\{[\s\S]*\}', card_content)
+                    if _json_match:
+                        card_parsed = _json.loads(_json_match.group(0))
+                        card_insights["correlation_summary"] = (card_parsed.get("correlation_summary") or "").strip()
+                        card_insights["factor_summary"] = (card_parsed.get("factor_summary") or "").strip()
+                        card_insights["clustering_summary"] = (card_parsed.get("clustering_summary") or "").strip()
+                        logger.info("✅ 可视化卡片数据洞察已生成")
+                except Exception as card_err:
+                    logger.warning(f"⚠️ [generate_profit_forecast_and_valuation] 卡片数据洞察生成失败: {str(card_err)}")
+
+                # 若批量生成后某条为空，则对该条单独二次生成（不截断）
+                if has_correlation and not (card_insights.get("correlation_summary") or "").strip():
+                    ctx = _json.dumps(result_dict.get("strategy_conclusion") or {}, ensure_ascii=False)
+                    if not ctx.strip():
+                        ctx = _json.dumps(result_dict.get("correlation_results") or [], ensure_ascii=False)
+                    card_insights["correlation_summary"] = await _generate_card_insight(llm, ctx, "相关性分析")
+                if has_factor and not (card_insights.get("factor_summary") or "").strip():
+                    ctx = _json.dumps(result_dict.get("factor_analysis") or {}, ensure_ascii=False)
+                    card_insights["factor_summary"] = await _generate_card_insight(llm, ctx, "因子分析")
+                if has_clustering and not (card_insights.get("clustering_summary") or "").strip():
+                    ctx = _json.dumps(result_dict.get("clustering_model") or {}, ensure_ascii=False)
+                    card_insights["clustering_summary"] = await _generate_card_insight(llm, ctx, "聚类分析")
+
+            result_dict["card_insights"] = card_insights
             
             # 5. 生成综合洞察文本（基于四个分析的结果）
             if normalized_model == "all" and (result_dict.get("correlation_results") or result_dict.get("factor_analysis") or result_dict.get("clustering_model")):

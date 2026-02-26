@@ -193,8 +193,265 @@ export default {
     useSuggestion(question) {
       this.inputText = question;
     },
-    parseMarkdown(text) { 
-      return typeof marked !== 'undefined' ? marked.parse(text) : text; 
+    parseMarkdown(text) {
+      if (text == null) return '';
+      const raw = typeof text === 'string' ? text : String(text);
+      // 1. 按 1/2/3 点换行：在“空格+数字+.”前插入换行，使 1. 2. 3. 各占一行
+      let out = raw.replace(/\s+(\d+)\./g, '\n$1.');
+      // 2. 按中文序号换行：在“一、”“二、”“三、”等前插入换行（非行首时）
+      out = out.replace(/([^\n])([一二三四五六七八九十]+、)/g, '$1\n$2');
+      // 按加粗小节标题换行
+      out = out.replace(/([^\n])(\*\*(?:长期|风险|关键|短期)[^*]*\*\*)/g, '$1\n$2');
+      return typeof marked !== 'undefined' && marked && marked.parse ? marked.parse(out) : out;
+    },
+    /**
+     * 规范化因子分析等报告中的表格，使 Markdown 能正确渲染：
+     * 1) 制表符行转为管道表格行
+     * 1b) 将“每行仅一个非空单元格”的连续行按表头列数合并为一行（解决 LLM 竖排输出）
+     * 2) 方差贡献表：因子名+三行数值 竖排合并
+     * 3/3b) 因子得分、指标矩阵：年份+多列数值 竖排合并
+     * 4) 因子载荷：指标名+3/4 个数值行 合并
+     * 5) 表头后补充分隔行
+     */
+    normalizeFactorTables(text) {
+      if (!text || typeof text !== 'string') return text;
+      let out = text;
+      // 1. 制表符行 -> 管道表格行
+      out = out.split('\n').map(line => {
+        if (line.indexOf('\t') === -1) return line;
+        const cells = line.split('\t').map(c => c.trim());
+        return '| ' + cells.join(' | ') + ' |';
+      }).join('\n');
+
+      // 1a. 无管道表头转管道：如 "年份  因子1  因子2"，便于后续竖排合并
+      const headerLike = /年份|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本|资本|综合/;
+      out = out.split('\n').map(line => {
+        const t = line.trim();
+        if (t.startsWith('|') && t.endsWith('|')) return line;
+        if (headerLike.test(t)) {
+          const cells = t.split(/\t+/).map(c => c.trim()).filter(Boolean);
+          if (cells.length >= 2) return '| ' + cells.join(' | ') + ' |';
+          const spaceCells = t.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+          if (spaceCells.length >= 2) return '| ' + spaceCells.join(' | ') + ' |';
+        }
+        return line;
+      }).join('\n');
+
+      // 1b. 合并“单列竖排”：每行只有第一个单元格非空（或整行只有一个非空）的连续 N 行 -> 一行 N 列（N=最近表头列数）
+      out = this.collapseSingleCellPipeRows(out);
+
+      // 2. 方差贡献分析：因子N：xxx + 三行（特征值、方差贡献率、累计贡献率）合并为一行
+      out = out.replace(
+        /(?:^\|\s*)?(因子\d+：[^\n|]+?)\s*\|?\s*\n\s*([\d.]+)\s*\n\s*([\d.]+%)\s*\n\s*([\d.]+%)/gm,
+        (_, name, v1, v2, v3) => `| ${name.trim()} | ${v1} | ${v2} | ${v3} |`
+      );
+
+      // 3. 因子得分表：年份（4 位）+ 三行数值 合并为一行
+      // 3b. 指标数据矩阵：年份 + 5～10 个数值行 合并为一行（先做多列，再做 3 列）
+      for (let cols = 10; cols >= 5; cols--) {
+        const numPart = Array(cols).fill('([-\\d.]+)').join('\\s*\\n\\s*');
+        const re = new RegExp('(?:^\\|\\s*)?(\\d{4})\\s*\\|?\\s*\\n\\s*' + numPart, 'gm');
+        out = out.replace(re, (m, year, ...vals) => '| ' + year + ' | ' + vals.slice(0, cols).join(' | ') + ' |');
+      }
+      out = out.replace(
+        /(?:^\|\s*)?(\d{4})\s*\|?\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)/gm,
+        (_, year, s1, s2, s3) => `| ${year} | ${s1} | ${s2} | ${s3} |`
+      );
+
+      // 4. 因子载荷/指标矩阵：指标名（短且非句子）+ 3 或 4 个数值行 合并为一行
+      out = out.replace(
+        /(?:^\|\s*)?([^\n|]{1,30}?)\s*\|?\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)\s*\n\s*([-\d.]+)(?:\s*\n\s*([-\d.]+))?/gm,
+        (m, name, n1, n2, n3, n4) => {
+          const nameTrim = name.trim();
+          if (!nameTrim || /^[\d.]+$/.test(nameTrim)) return m;
+          if (/[。，、]/.test(nameTrim) || nameTrim.length > 25) return m;
+          if (n4 !== undefined) return `| ${nameTrim} | ${n1} | ${n2} | ${n3} | ${n4} |`;
+          return `| ${nameTrim} | ${n1} | ${n2} | ${n3} |`;
+        }
+      );
+
+      // 5. 所有管道表：表头后若无分隔行则插入（仅当首行像表头：含 年份/指标/因子/特征值/方差/贡献/得分/共同度 等）
+      out = out.replace(
+        /(^\|[^\n]+\|)\s*\n(\s*)(^\|[^\n]+\|)/gm,
+        (m, header, mid, dataRow) => {
+          if (!headerLike.test(header)) return m;
+          if (/^\|[\s\-:|]+\|$/.test(header.trim())) return m;
+          if (/^\|[\s\-:|]+\|$/.test(dataRow.trim())) return m;
+          const colCount = (header.match(/\|/g) || []).length - 1;
+          if (colCount < 2) return m;
+          const sep = '|' + Array(colCount).fill('---').join('|') + '|';
+          return header + '\n' + sep + '\n' + mid + dataRow;
+        }
+      );
+      return out;
+    },
+    /**
+     * 将“每行仅一个非空单元格”的连续管道行按最近表头列数合并为多列一行。
+     * 解决 LLM 输出为「表头+每列竖排」时的错位（如 年份|空|空 + 2.75|空|空 + ...）。
+     */
+    collapseSingleCellPipeRows(text) {
+      const headerLike = /年份|指标|因子|特征值|方差|贡献|得分|共同度|净息差|ROE|ROA|不良|拨备|成本|资本|平均|信贷/;
+      const lines = text.split('\n');
+      const result = [];
+      let buffer = [];
+      let colCount = 0;
+      /** 因子载荷等：前两格有值的一行 + 后续 (colCount-2) 个单格行，合并为一行 */
+      let rowPrefix = [];
+      let needRest = 0;
+      let rawCellBuffer = [];
+      /** 单列表格竖排转横排：表头+多行单格 -> 一行多列 */
+      let transposeBuffer = [];
+
+      function isPipeLine(line) {
+        const t = line.trim();
+        return t.startsWith('|') && t.endsWith('|');
+      }
+      function isSeparatorLine(line) {
+        const t = line.trim();
+        return /^\|[\s\-:|]+\|$/.test(t);
+      }
+      function isHeaderLike(line) {
+        return headerLike.test(line) && !isSeparatorLine(line);
+      }
+      /** 整行只有一个非空单元格时返回该值，否则返回 null */
+      function singleCellValue(line) {
+        const cells = line.split('|').map(c => c.trim()).filter(c => c.length > 0);
+        return cells.length === 1 ? cells[0] : null;
+      }
+      /** 前两格非空、其余空时返回 [first, second]，否则 null（用于因子载荷等） */
+      function firstTwoCells(line) {
+        const cells = line.split('|').map(c => c.trim());
+        const nonEmpty = cells.filter(c => c.length > 0);
+        return nonEmpty.length === 2 ? nonEmpty : null;
+      }
+      function isRawCellLine(line) {
+        const t = line.trim();
+        return t.length > 0 && !t.startsWith('|') && (/^\d{4}$/.test(t) || /^-?[\d.]+%?$/.test(t));
+      }
+
+      function flushBuffer() {
+        if (colCount >= 2 && buffer.length === colCount) {
+          const vals = buffer.map(ln => singleCellValue(ln));
+          if (vals.every(v => v !== null)) result.push('| ' + vals.join(' | ') + ' |');
+          else buffer.forEach(l => result.push(l));
+        } else buffer.forEach(l => result.push(l));
+        buffer = [];
+      }
+      function flushRowPrefix() {
+        if (rowPrefix.length > 0) {
+          result.push('| ' + rowPrefix.join(' | ') + ' |');
+          rowPrefix = [];
+          needRest = 0;
+        }
+      }
+      function flushRawCellBuffer() {
+        if (colCount >= 2 && rawCellBuffer.length === colCount) {
+          result.push('| ' + rawCellBuffer.join(' | ') + ' |');
+        } else rawCellBuffer.forEach(l => result.push(l));
+        rawCellBuffer = [];
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!isPipeLine(line)) {
+          flushBuffer();
+          flushRowPrefix();
+          flushTransposeBuffer();
+          if (isRawCellLine(line) && colCount >= 2) {
+            rawCellBuffer.push(line.trim());
+            if (rawCellBuffer.length === colCount) {
+              result.push('| ' + rawCellBuffer.join(' | ') + ' |');
+              rawCellBuffer = [];
+            }
+          } else {
+            flushRawCellBuffer();
+            colCount = 0;
+            result.push(line);
+          }
+          continue;
+        }
+        if (isSeparatorLine(line)) {
+          flushBuffer();
+          flushRowPrefix();
+          flushRawCellBuffer();
+          flushTransposeBuffer();
+          result.push(line);
+          continue;
+        }
+        const twoCell = firstTwoCells(line);
+        const single = singleCellValue(line) !== null;
+        if (isHeaderLike(line)) {
+          flushBuffer();
+          flushRowPrefix();
+          flushRawCellBuffer();
+          const n = (line.match(/\|/g) || []).length - 1;
+          if (n >= 2) {
+            flushTransposeBuffer();
+            colCount = n;
+            result.push(line);
+          } else if (n === 1) {
+            flushTransposeBuffer();
+            const headerCell = singleCellValue(line);
+            if (headerCell !== null) {
+              transposeBuffer = [headerCell];
+              colCount = 1;
+            } else {
+              result.push(line);
+            }
+          } else {
+            result.push(line);
+          }
+          continue;
+        }
+        if (single && colCount === 1) {
+          const v = singleCellValue(line);
+          if (v !== null) {
+            transposeBuffer.push(v);
+            continue;
+          }
+        }
+        if (twoCell !== null && colCount >= 2) {
+          flushBuffer();
+          const rest = colCount - 2;
+          if (rest <= 0) {
+            result.push(line);
+            continue;
+          }
+          rowPrefix = [...twoCell];
+          needRest = rest;
+          continue;
+        }
+        if (single && needRest > 0) {
+          const v = singleCellValue(line);
+          rowPrefix.push(v);
+          needRest--;
+          if (needRest === 0) {
+            result.push('| ' + rowPrefix.join(' | ') + ' |');
+            rowPrefix = [];
+          }
+          continue;
+        }
+        if (single && colCount >= 2) {
+          flushRowPrefix();
+          buffer.push(line);
+          if (buffer.length === colCount) {
+            const vals = buffer.map(ln => singleCellValue(ln));
+            if (vals.every(v => v !== null)) result.push('| ' + vals.join(' | ') + ' |');
+            else buffer.forEach(l => result.push(l));
+            buffer = [];
+          }
+          continue;
+        }
+        flushBuffer();
+        flushRowPrefix();
+        colCount = 0;
+        result.push(line);
+      }
+      flushBuffer();
+      flushRowPrefix();
+      flushRawCellBuffer();
+      flushTransposeBuffer();
+      return result.join('\n');
     },
     deleteMessage(index) {
       this.$emit('delete-message', index);

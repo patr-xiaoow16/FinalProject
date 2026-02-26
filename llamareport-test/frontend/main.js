@@ -1664,6 +1664,180 @@ const App = {
               }
             }
           }
+
+          // 投资策略（相关性/因子/聚类）：将后端返回的可视化数据以卡片形式加入可视化视图界面，并附带数据洞察
+          if (sectionName === 'profit_forecast') {
+            const toolOutput = result.structured_response?.profit_forecast_and_valuation
+            if (toolOutput && typeof toolOutput === 'object') {
+              const maxInsightLen = 80
+              const truncate = (s) => (s && typeof s === 'string') ? (s.length > maxInsightLen ? s.slice(0, maxInsightLen) + '…' : s) : ''
+              const buildStrategyInsights = (c, cardInsights) => {
+                if (cardInsights && cardInsights.correlation_summary) {
+                  return [{ insight_type: 'trend', description: cardInsights.correlation_summary }]
+                }
+                if (!c || typeof c !== 'object') return []
+                const list = []
+                if (c.short_term) list.push({ insight_type: 'trend', description: truncate(`短期配置：${c.short_term}`) })
+                if (c.long_term) list.push({ insight_type: 'trend', description: truncate(`长期配置：${c.long_term}`) })
+                if (c.risk_control) list.push({ insight_type: 'risk', description: truncate(`风险管控：${c.risk_control}`) })
+                const signals = c.key_signals
+                if (Array.isArray(signals) && signals.length) list.push({ insight_type: 'signal', description: '关键信号', key_findings: signals.map(s => truncate(String(s))) })
+                return list
+              }
+              const buildFactorInsights = (fa, cardInsights) => {
+                if (cardInsights && cardInsights.factor_summary) {
+                  return [{ insight_type: 'trend', description: cardInsights.factor_summary }]
+                }
+                if (!fa || typeof fa !== 'object') return []
+                const list = []
+                if (fa.interpretation && typeof fa.interpretation === 'string' && fa.interpretation.trim()) {
+                  list.push({ insight_type: 'trend', description: truncate(fa.interpretation.trim()) })
+                }
+                const factors = fa.factors || []
+                const varianceExplained = fa.variance_explained || {}
+                if (factors.length && Object.keys(varianceExplained).length) {
+                  const summary = factors.slice(0, 3).map(f => `${f}（${typeof varianceExplained[f] === 'number' ? (varianceExplained[f] * 100).toFixed(1) : varianceExplained[f]}%）`).join('；')
+                  if (summary) list.push({ insight_type: 'distribution', description: truncate(`因子方差解释：${summary}`) })
+                }
+                return list
+              }
+              const buildClusteringInsights = (cm, cardInsights) => {
+                if (cardInsights && cardInsights.clustering_summary) {
+                  return [{ insight_type: 'trend', description: cardInsights.clustering_summary }]
+                }
+                if (!cm || typeof cm !== 'object') return []
+                const list = []
+                const conclusion = cm.conclusion
+                if (conclusion && typeof conclusion === 'object' && conclusion.current_position) {
+                  list.push({ insight_type: 'trend', description: truncate(`聚类定位：${conclusion.current_position}`) })
+                }
+                const coreInsights = cm.core_insights || []
+                if (coreInsights.length) list.push({ insight_type: 'signal', description: '核心发现', key_findings: coreInsights.map(s => truncate(String(s))) })
+                const riskNotes = cm.risk_notes || []
+                if (riskNotes.length) list.push({ insight_type: 'risk', description: '风险提示', key_findings: riskNotes.map(s => truncate(String(s))) })
+                return list
+              }
+              const cardInsights = toolOutput.card_insights || {}
+              const cardsToAdd = []
+              if (toolOutput.correlation_visualization && toolOutput.correlation_visualization.has_visualization) {
+                cardsToAdd.push({
+                  id: `investment-strategy-correlation-${Date.now()}`,
+                  question: '相关性分析结果',
+                  source: 'investment_strategy',
+                  timestamp: new Date(),
+                  type: 'chart',
+                  data: {
+                    has_visualization: true,
+                    visualization_type: toolOutput.correlation_visualization.visualization_type || 'plotly',
+                    chart_config: toolOutput.correlation_visualization.chart_config,
+                    insights: buildStrategyInsights(toolOutput.strategy_conclusion, cardInsights)
+                  }
+                })
+              } else if (Array.isArray(toolOutput.correlation_results) && toolOutput.correlation_results.length > 0) {
+                const correlationData = toolOutput.correlation_results
+                const labels = correlationData.map(r => `${r.target_metric} vs ${r.driver_metric}`)
+                const correlations = correlationData.map(r => r.correlation || 0)
+                cardsToAdd.push({
+                  id: `investment-strategy-correlation-${Date.now()}`,
+                  question: '相关性分析结果',
+                  source: 'investment_strategy',
+                  timestamp: new Date(),
+                  type: 'chart',
+                  data: {
+                    has_visualization: true,
+                    visualization_type: 'plotly',
+                    chart_config: {
+                      chart_type: 'bar',
+                      traces: [{
+                        type: 'bar',
+                        name: '相关系数',
+                        x: labels,
+                        y: correlations,
+                        marker: { color: correlations.map(c => c >= 0 ? '#10b981' : '#ef4444') }
+                      }],
+                      layout: {
+                        title: '相关性分析结果',
+                        xaxis_title: '指标对',
+                        yaxis_title: '相关系数',
+                        yaxis: { range: [-1, 1] }
+                      }
+                    },
+                    insights: buildStrategyInsights(toolOutput.strategy_conclusion, cardInsights)
+                  }
+                })
+              }
+              if (toolOutput.factor_analysis && toolOutput.factor_analysis.factors && toolOutput.factor_analysis.factors.length > 0) {
+                const factorAnalysis = toolOutput.factor_analysis
+                const factors = factorAnalysis.factors || []
+                const varianceExplained = factorAnalysis.variance_explained || {}
+                const varianceValues = factors.map(f => varianceExplained[f] || 0)
+                cardsToAdd.push({
+                  id: `investment-strategy-factor-${Date.now()}`,
+                  question: '因子分析结果',
+                  source: 'investment_strategy',
+                  timestamp: new Date(),
+                  type: 'chart',
+                  data: {
+                    has_visualization: true,
+                    visualization_type: 'plotly',
+                    chart_config: {
+                      chart_type: 'bar',
+                      traces: [{
+                        type: 'bar',
+                        name: '解释方差比例',
+                        x: factors,
+                        y: varianceValues,
+                        marker: { color: '#764ba2' }
+                      }],
+                      layout: {
+                        title: '因子分析 - 解释方差比例',
+                        xaxis_title: '因子',
+                        yaxis_title: '解释方差比例',
+                        yaxis: { tickformat: '.1%' }
+                      }
+                    },
+                    insights: buildFactorInsights(toolOutput.factor_analysis, cardInsights)
+                  }
+                })
+              }
+              if (toolOutput.clustering_model && toolOutput.clustering_model.group_results) {
+                const clustering = toolOutput.clustering_model
+                const groups = clustering.group_results || []
+                const groupNames = groups.map(g => g.group_name || '未知组')
+                cardsToAdd.push({
+                  id: `investment-strategy-clustering-${Date.now()}`,
+                  question: '聚类分析结果',
+                  source: 'investment_strategy',
+                  timestamp: new Date(),
+                  type: 'chart',
+                  data: {
+                    has_visualization: true,
+                    visualization_type: 'plotly',
+                    chart_config: {
+                      chart_type: 'bar',
+                      traces: [{
+                        type: 'bar',
+                        name: '分组',
+                        x: groupNames,
+                        y: groups.map((_, i) => i + 1),
+                        marker: { color: '#f59e0b' }
+                      }],
+                      layout: {
+                        title: '聚类分析 - 投资组合分组',
+                        xaxis_title: '分组',
+                        yaxis_title: '组别编号'
+                      }
+                    },
+                    insights: buildClusteringInsights(toolOutput.clustering_model, cardInsights)
+                  }
+                })
+              }
+              cardsToAdd.forEach(card => visualizationCards.value.push(card))
+              if (cardsToAdd.length > 0) {
+                showMessage('success', `✅ 已添加 ${cardsToAdd.length} 个投资策略视图到可视化面板`)
+              }
+            }
+          }
           
           if (visualization && visualization.type === 'financial_tables' && Array.isArray(visualization.tables)) {
             visualization.tables
@@ -1700,13 +1874,15 @@ const App = {
             chatMessages.value.push({
               type: 'assistant',
               content: `${answerHeader}\n\n${answerText}`,
-              timestamp: new Date()
+              timestamp: new Date(),
+              sectionName: sectionName
             })
           } else {
             chatMessages.value.push({
               type: 'assistant',
               content: answerHeader,
-              timestamp: new Date()
+              timestamp: new Date(),
+              sectionName: sectionName
             })
           }
         }
@@ -2113,6 +2289,20 @@ const App = {
       handleSendMessage, handleAgentQuery, executeAgentQuery, handleDupontAnalysis, handleGetSuggestions, handleQuickAnalysis,
       handleGenerateReport, handleGenerateSection, handleClearChat, checkIndexStatus, loadQuickOverview,
       handleDeleteMessage, goToAgentAnalysis, goBackToMain,
+      handleAddVisualizationCards: (cards) => {
+        if (!Array.isArray(cards) || cards.length === 0) return
+        cards.forEach(card => {
+          if (card && card.data && card.data.has_visualization) {
+            visualizationCards.value.push({
+              ...card,
+              timestamp: card.timestamp || new Date()
+            })
+          }
+        })
+        if (cards.length > 0) {
+          showMessage('success', `✅ 已添加 ${cards.length} 个投资策略视图到可视化面板`)
+        }
+      },
       handleRemoveVizCard: (cardId) => {
         // 删除整个卡片（包括图表、推荐说明、数据洞察等所有内容）
         console.log('🗑️ 处理删除卡片请求:', cardId);
@@ -2483,6 +2673,7 @@ const App = {
         v-if="currentPage === 'agent-analysis'"
         :on-back="goBackToMain"
         :on-query="executeAgentQuery"
+        :on-add-visualization-cards="handleAddVisualizationCards"
       />
       
       <!-- 主页面 -->

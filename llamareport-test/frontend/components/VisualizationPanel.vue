@@ -203,6 +203,7 @@
             :class="{ 
               'selected': isCardSelected(card.id), 
               'linkage-card': card.isLinkageGenerated,
+              'investment-strategy-card': card.source === 'investment_strategy',
               [`linkage-type-${card.viewType}`]: card.isLinkageGenerated
             }"
             @click="handleCardClick(card.id, $event)"
@@ -957,6 +958,13 @@ export default {
             if (trace.type === 'pie') {
               plotlyTrace.labels = trace.text || [];
               plotlyTrace.values = trace.y || [];
+            } else if (trace.type === 'heatmap') {
+              plotlyTrace.z = trace.z || [];
+              plotlyTrace.x = trace.x || [];
+              plotlyTrace.y = trace.y || [];
+              if (trace.colorscale) plotlyTrace.colorscale = trace.colorscale;
+              if (trace.zmin != null) plotlyTrace.zmin = trace.zmin;
+              if (trace.zmax != null) plotlyTrace.zmax = trace.zmax;
             } else {
               plotlyTrace.x = trace.x || [];
               plotlyTrace.y = trace.y || [];
@@ -982,7 +990,7 @@ export default {
               title: chartConfig.layout.yaxis_title || '', 
               gridcolor: '#e0e0e0' 
             },
-            height: 320,
+            height: chartConfig.layout.height || 320,
             template: chartConfig.layout.template || 'plotly_white',
             hovermode: chartConfig.layout.hovermode || 'closest',
             showlegend: chartConfig.layout.showlegend !== false,
