@@ -1952,6 +1952,120 @@ body {
     gap: 8px;
 }
 
+.drill-modal-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1200;
+    padding: 16px;
+}
+
+.drill-modal {
+    width: min(640px, 100%);
+    background: #ffffff;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+    overflow: hidden;
+}
+
+.drill-modal-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.drill-modal-header h3 {
+    margin: 0;
+    font-size: 16px;
+    color: #0f172a;
+}
+
+.drill-modal-body {
+    padding: 14px 16px;
+}
+
+.drill-modal-tip {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    color: #334155;
+}
+
+.drill-modal-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 120px;
+    outline: none;
+}
+
+.drill-modal-textarea:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.drill-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 16px 14px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.drill-btn {
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.drill-btn-cancel {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #334155;
+}
+
+.drill-btn-cancel:hover {
+    background: #eef2f7;
+}
+
+.drill-btn-run {
+    background: #2563eb;
+    color: #ffffff;
+}
+
+.drill-btn-run:hover {
+    background: #1d4ed8;
+}
+
+.viz-card-drill-back,
+.viz-card-clear-drill {
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #334155;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.viz-card-drill-back:hover,
+.viz-card-clear-drill:hover {
+    background: #e2e8f0;
+    border-color: #94a3b8;
+}
+
 .viz-card-close {
     background: transparent;
     border: none;

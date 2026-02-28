@@ -1468,7 +1468,7 @@ const App = {
       
       try {
         const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000) // 10分钟超时
+        const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000) // 20分钟超时（综合投资策略等多步分析可能较久）
         
         const response = await fetch('/agent/generate-section', {
           method: 'POST',
@@ -2255,7 +2255,7 @@ const App = {
                   })
                 })
 
-                // 四维评估打分图
+                // 四维评估打分图（雷达图）
                 const scoreTable = mdTables.find(t => {
                   const hs = (t.headers || []).map(h => String(h))
                   return hs.some(h => h.includes('维度')) &&
@@ -2270,10 +2270,18 @@ const App = {
                   const idxDim = findIndex(['维度'])
                   const idxScore = findIndex(['评分'])
                   const idxWeighted = findIndex(['加权得分'])
-                  const dims = rows.map(r => String(r[idxDim] || '').replace(/\*/g, '').trim()).filter(Boolean)
-                  const scores = rows.map(r => parseMetricNumber(r[idxScore])).filter(v => v !== null)
+                  let dims = rows.map(r => String(r[idxDim] || '').replace(/\*/g, '').trim()).filter(Boolean)
+                  let scores = rows.map(r => parseMetricNumber(r[idxScore])).filter(v => v !== null)
                   const weighted = rows.map(r => parseMetricNumber(r[idxWeighted])).filter(v => v !== null)
+                  // 排除「综合」行，只保留四维
+                  const excludeRow = (arr, idx) => !/综合/.test(String(dims[idx] || ''))
+                  const keep = dims.map((_, i) => i).filter(i => excludeRow(dims, i))
+                  dims = keep.map(i => dims[i])
+                  scores = keep.map(i => scores[i])
                   if (dims.length >= 3 && scores.length === dims.length) {
+                    // 雷达图：闭合多边形需首尾重复
+                    const rClosed = [...scores, scores[0]]
+                    const thetaClosed = [...dims, dims[0]]
                     cardsToAdd.push({
                       id: `comprehensive-strategy-score-${Date.now()}`,
                       question: '综合策略-四维评估打分',
@@ -2284,16 +2292,38 @@ const App = {
                         has_visualization: true,
                         visualization_type: 'plotly',
                         chart_config: {
-                          chart_type: 'bar',
+                          chart_type: 'radar',
                           traces: [
-                            { type: 'bar', name: '评分(1-5)', x: dims, y: scores },
-                            ...(weighted.length === dims.length ? [{ type: 'bar', name: '加权得分', x: dims, y: weighted }] : [])
+                            {
+                              type: 'scatterpolar',
+                              name: '四维评估',
+                              r: rClosed,
+                              theta: thetaClosed,
+                              fill: 'toself',
+                              mode: 'lines+markers',
+                              line: { color: 'rgb(55, 128, 191)', width: 2 },
+                              marker: { size: 8, color: 'rgb(55, 128, 191)' }
+                            }
                           ],
                           layout: {
-                            title: '四维评估打分对比',
-                            barmode: 'group',
-                            xaxis_title: '评估维度',
-                            yaxis_title: '分值'
+                            title: '四维评估打分',
+                            polar: {
+                              radialaxis: {
+                                visible: true,
+                                range: [0, 5],
+                                tickmode: 'linear',
+                                tick0: 0,
+                                dtick: 1,
+                                gridcolor: '#e0e0e0',
+                                linecolor: '#999'
+                              },
+                              angularaxis: {
+                                rotation: 90,
+                                direction: 'counterclockwise'
+                              }
+                            },
+                            height: 360,
+                            showlegend: false
                           }
                         },
                         insights: [
@@ -2851,7 +2881,7 @@ const App = {
         visualizationCards.value = visualizationCards.value.filter(card => card.type !== 'dupont')
         dupontData.value = null
       },
-      handleGenerateComprehensiveAnalysis: async (selectedCards, explorationQuestion = null) => {
+      handleGenerateComprehensiveAnalysis: async (selectedCards, explorationQuestion = null, interactionContext = null) => {
         // 处理生成综合分析请求（基于视图联动方案，支持探索问题）
         const cardCount = selectedCards.length
         const loadingMsg = explorationQuestion
@@ -2887,6 +2917,7 @@ const App = {
                 }
               }),
               exploration_question: explorationQuestion || null,  // ⭐新增：探索问题
+              interaction_context: interactionContext || null,  // ⭐新增：交互上下文（如数据点钻取）
               overview_data: quickOverviewData.value,  // 传递财务概况数据
               context_filter: selectedFile.value ? {
                 filename: selectedFile.value.filename

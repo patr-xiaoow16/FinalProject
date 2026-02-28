@@ -2420,6 +2420,38 @@ class ComprehensiveAnalysisRequest(BaseModel):
         default=None,
         description="用户输入的深入探索问题（可选，如果为空则进行综合分析）"
     )
+    interaction_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="交互上下文（如数据点钻取），用于生成更精准的联动分析"
+    )
+
+
+def _build_drill_exploration_question(interaction_context: Dict[str, Any]) -> Optional[str]:
+    """
+    从前端数据点钻取上下文生成探索问题（用于复用现有联动分析链路）
+    """
+    if not interaction_context:
+        return None
+
+    if interaction_context.get("interaction_type") != "data_point_drill":
+        return None
+
+    clicked_point = interaction_context.get("clicked_point", {}) or {}
+    drill_type = interaction_context.get("drill_type", "general_drill")
+    chart_info = interaction_context.get("chart_info", {}) or {}
+
+    x_value = clicked_point.get("x")
+    y_value = clicked_point.get("y")
+    label = clicked_point.get("label") or clicked_point.get("series_name") or "该数据点"
+    metric_hint = "、".join(chart_info.get("key_metrics", [])[:2]) if chart_info.get("key_metrics") else "相关指标"
+
+    if drill_type == "time_drill":
+        return f"请围绕时间点 {x_value} 深入分析 {metric_hint} 的变化原因，并给出该时点前后对比。"
+    if drill_type == "category_drill":
+        return f"请对分类「{label}」做下钻分析，说明其构成、驱动因素及与其他分类的差异。"
+    if drill_type == "anomaly_analysis":
+        return f"数据点 {x_value}/{label}（值为 {y_value}）疑似异常，请分析异常成因、影响与验证路径。"
+    return f"请对数据点 {x_value}/{label}（值为 {y_value}）做下钻分析，给出关键发现和验证结论。"
 
 def _extract_company_and_year_from_filename(filename: str) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -2474,6 +2506,14 @@ async def generate_comprehensive_analysis(request: ComprehensiveAnalysisRequest)
             exploration_question = exploration_question.strip()
             if not exploration_question:
                 exploration_question = None
+
+        # 处理交互上下文（交互形式3：数据点钻取）
+        interaction_context = request.interaction_context if hasattr(request, 'interaction_context') else None
+        if interaction_context and not exploration_question:
+            drill_question = _build_drill_exploration_question(interaction_context)
+            if drill_question:
+                exploration_question = drill_question
+                logger.info(f"识别到数据点钻取交互，自动生成探索问题: {exploration_question}")
         
         # 确定探索模式
         if exploration_question:
@@ -2652,6 +2692,17 @@ async def generate_comprehensive_analysis(request: ComprehensiveAnalysisRequest)
                         "key_findings": synthesis_insight.get("key_findings", []),
                         "confidence": synthesis_insight.get("confidence", "medium")
                     }
+                # 如果综合洞察为空，尝试从视图洞察中提取一句结论
+                if (not insight_data or not insight_data.get("conclusion")) and isinstance(viz_data, dict):
+                    viz_insights = viz_data.get("insights", [])
+                    if isinstance(viz_insights, list) and viz_insights:
+                        first_desc = str(viz_insights[0].get("description", "")).strip() if isinstance(viz_insights[0], dict) else ""
+                        if first_desc:
+                            insight_data = {
+                                "conclusion": first_desc,
+                                "key_findings": [],
+                                "confidence": "medium"
+                            }
                 
                 new_views_list.append({
                     "view_id": view.view_id if hasattr(view, 'view_id') else f"view_{len(new_views_list)}",

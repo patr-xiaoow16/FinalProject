@@ -7,6 +7,7 @@ import logging
 import json
 import re
 import traceback
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from llama_index.core import Settings
 from llama_index.core.llms import ChatMessage
@@ -23,7 +24,8 @@ from models.visualization_models import (
     PlotlyChartConfig,
     ChartTrace,
     ChartLayout,
-    VisualizationResponse
+    VisualizationResponse,
+    VisualizationInsight
 )
 
 from domain_knowledge_retriever import retrieve_domain_knowledge
@@ -305,7 +307,7 @@ class LinkageGenerationEngine:
             )
             
             response = await self._call_llm(prompt)
-            return self._parse_llm_response(response)
+            return self._parse_llm_response(response, domain_knowledge_snippet=domain_knowledge_snippet)
         except Exception as e:
             logger.error(f"联动分析失败: {str(e)}")
             return {
@@ -631,8 +633,44 @@ class LinkageGenerationEngine:
         response = self.llm.chat(messages)
         return response.message.content
     
-    def _parse_llm_response(self, response: str) -> Dict[str, Any]:
+    def _extract_domain_preferred_charts(self, domain_knowledge_snippet: Optional[str]) -> List[str]:
+        """从步骤3.5的领域知识片段中提取建议图表（按出现顺序）。"""
+        if not domain_knowledge_snippet:
+            return []
+        text = str(domain_knowledge_snippet)
+        matches = re.findall(r"建议图表[：:]\s*([^\n。]+)", text)
+        charts: List[str] = []
+        for m in matches:
+            parts = re.split(r"[、,，/；;]|及", m)
+            for p in parts:
+                p = p.strip(" .。")
+                if p and p not in charts:
+                    charts.append(p)
+        return charts[:5]
+
+    def _apply_domain_chart_priority(self, parsed: Dict[str, Any], preferred_charts: List[str]) -> Dict[str, Any]:
+        """若领域知识给出推荐图表，则优先注入/覆盖到联动策略。"""
+        if not preferred_charts:
+            return parsed
+
+        workflow = parsed.get("analysis_workflow", {}) or {}
+        workflow["preferred_chart_types"] = preferred_charts
+        parsed["analysis_workflow"] = workflow
+
+        if not isinstance(parsed.get("view_generation_strategy"), list) or not parsed.get("view_generation_strategy"):
+            parsed["view_generation_strategy"] = [{"view_index": 0, "strategy": {}}]
+
+        for view_strategy in parsed.get("view_generation_strategy", []):
+            strategy = view_strategy.setdefault("strategy", {})
+            if_sufficient = strategy.setdefault("if_data_sufficient", {})
+            if_partial = strategy.setdefault("if_data_partial", {})
+            if_sufficient["chart_type"] = preferred_charts[0]
+            if_partial["chart_type"] = preferred_charts[0]
+        return parsed
+
+    def _parse_llm_response(self, response: str, domain_knowledge_snippet: Optional[str] = None) -> Dict[str, Any]:
         """解析LLM响应（改进：更好的JSON解析容错）"""
+        preferred_charts = self._extract_domain_preferred_charts(domain_knowledge_snippet)
         try:
             # ⭐改进：尝试多种JSON提取方式
             content = response.strip()
@@ -642,7 +680,8 @@ class LinkageGenerationEngine:
             if json_match:
                 try:
                     parsed = json.loads(json_match.group(1))
-                    return self._ensure_required_fields(parsed)
+                    parsed = self._ensure_required_fields(parsed)
+                    return self._apply_domain_chart_priority(parsed, preferred_charts)
                 except json.JSONDecodeError:
                     pass
             
@@ -651,14 +690,16 @@ class LinkageGenerationEngine:
             if json_match:
                 try:
                     parsed = json.loads(json_match.group())
-                    return self._ensure_required_fields(parsed)
+                    parsed = self._ensure_required_fields(parsed)
+                    return self._apply_domain_chart_priority(parsed, preferred_charts)
                 except json.JSONDecodeError:
                     pass
             
             # 方式3：尝试直接解析整个响应
             try:
                 parsed = json.loads(content)
-                return self._ensure_required_fields(parsed)
+                parsed = self._ensure_required_fields(parsed)
+                return self._apply_domain_chart_priority(parsed, preferred_charts)
             except json.JSONDecodeError:
                 pass
             
@@ -668,7 +709,8 @@ class LinkageGenerationEngine:
             fixed_content = re.sub(r',\s*]', ']', fixed_content)  # 移除数组尾随逗号
             try:
                 parsed = json.loads(fixed_content)
-                return self._ensure_required_fields(parsed)
+                parsed = self._ensure_required_fields(parsed)
+                return self._apply_domain_chart_priority(parsed, preferred_charts)
             except json.JSONDecodeError:
                 pass
             
@@ -679,7 +721,7 @@ class LinkageGenerationEngine:
             logger.error(f"无法解析LLM响应: {str(e)}")
             logger.debug(f"原始响应（前1000字符）: {response[:1000]}")
             # ⭐改进：即使解析失败，也创建一个基本的data_requirements，确保能生成视图
-            return {
+            parsed = {
                 "error": "LLM响应解析失败",
                 "raw_response": response[:500],
                 "analysis_workflow": {
@@ -728,6 +770,7 @@ class LinkageGenerationEngine:
                     }
                 }]
             }
+            return self._apply_domain_chart_priority(parsed, preferred_charts)
     
     def _ensure_required_fields(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
         """确保解析结果包含所有必需字段"""
@@ -1193,6 +1236,28 @@ class NewViewGenerator:
         self.rag_engine = rag_engine
         self.data_retriever = data_retriever
         self.llm = llm or Settings.llm
+        self._view_selection_doc_cache: Optional[str] = None
+
+    def _load_view_selection_doc(self) -> str:
+        """
+        读取视图选择文档（可由业务持续维护）。
+        优先读取 backend/视图选择.md，其次 domain_knowledge/视图选择.md。
+        """
+        if self._view_selection_doc_cache is not None:
+            return self._view_selection_doc_cache
+        candidate_paths = [
+            Path(__file__).resolve().parent.parent / "视图选择.md",
+            Path(__file__).resolve().parent.parent / "domain_knowledge" / "视图选择.md",
+        ]
+        for p in candidate_paths:
+            try:
+                if p.exists() and p.is_file():
+                    self._view_selection_doc_cache = p.read_text(encoding="utf-8")
+                    return self._view_selection_doc_cache
+            except Exception:
+                continue
+        self._view_selection_doc_cache = ""
+        return ""
     
     async def generate_views(
         self,
@@ -1522,6 +1587,14 @@ class NewViewGenerator:
     def _retrieved_data_summary(self, retrieved_data: Dict[str, Any]) -> str:
         """生成检索数据的可读摘要，便于在日志中查看（不含 raw_text）。"""
         labels = retrieved_data.get("labels", [])
+        # 清理误提取的“年份”数值系列，避免干扰图表类型判断
+        cleaned_series = []
+        for s in (retrieved_data.get("series", []) or []):
+            s_name = str(s.get("name", "")).strip().lower()
+            if s_name in {"年份", "year"}:
+                continue
+            cleaned_series.append(s)
+        retrieved_data["series"] = cleaned_series
         values = retrieved_data.get("values", [])
         series = retrieved_data.get("series", [])
         unit = retrieved_data.get("unit", "")
@@ -1608,6 +1681,25 @@ class NewViewGenerator:
         card_analysis: Optional[Dict[str, Any]] = None  # ⭐新增：多视图分析结果
     ) -> str:
         """构建视图生成的Prompt（优化：充分利用多视图综合分析结果）"""
+        view_selection_doc = self._load_view_selection_doc()
+        preferred_charts = requirement.get("analysis_workflow", {}).get("preferred_chart_types", [])
+        preferred_chart_section = ""
+        if preferred_charts:
+            preferred_chart_section = f"""
+### ⭐ 图表优先级规则（必须遵守）
+步骤3.5（indicators.md）已推荐图表：{", ".join(preferred_charts)}
+**你必须优先使用上述推荐图表类型。**
+只有当该图表与数据结构完全不匹配时，才可降级到其他类型，并在description说明原因。
+"""
+        view_selection_section = ""
+        if view_selection_doc:
+            view_selection_section = f"""
+### ⭐ 视图选择规范（来自视图选择.md）
+以下文档给出了可选视图类型、示例代码和适用场景。请在**未命中步骤3.5推荐图表**时，按该规范选择最合适的图表：
+
+{view_selection_doc[:2200]}
+"""
+
         # 获取分析流程判断（如果有）
         analysis_workflow = requirement.get('analysis_workflow', {})
         workflow_section = ""
@@ -1670,6 +1762,8 @@ class NewViewGenerator:
 {workflow_section}
 {insight_section}
 {relationship_section}
+{preferred_chart_section}
+{view_selection_section}
 ### 1. 视图需求
 视图类型：{requirement.get('view_type', 'verify')}
 视图描述：{requirement.get('view_description', '')}
@@ -1776,7 +1870,7 @@ class NewViewGenerator:
 
 {{
     "has_visualization": true/false,
-    "chart_type": "bar/line/pie/scatter/table",
+    "chart_type": "bar/line/pie/scatter/area/grouped_bar/stacked_bar/heatmap/table",
     "title": "图表标题",
     "description": "图表描述（包含数据质量说明）",
     "traces": [
@@ -1797,7 +1891,14 @@ class NewViewGenerator:
     }},
     "data_quality_note": "数据质量说明（如果有）",
     "missing_data_note": "缺失数据说明（如果有）",
-    "suggested_queries": ["建议查询1", "建议查询2"]（如果数据不足）
+    "suggested_queries": ["建议查询1", "建议查询2"]（如果数据不足）,
+    "insights": [
+        {{
+            "insight_type": "trend/comparison/distribution/correlation/anomaly",
+            "description": "一句洞察描述",
+            "key_findings": ["发现1", "发现2"]
+        }}
+    ]
 }}
 
 ## ⭐ 关键要求（必须遵守）：
@@ -1832,6 +1933,44 @@ class NewViewGenerator:
         
         response = self.llm.chat(messages)
         return response.message.content
+
+    def _normalize_chart_type(self, chart_type_raw: Any) -> ChartType:
+        """将LLM输出的图表类型归一化为ChartType，避免无效值回退成bar。"""
+        raw = str(chart_type_raw or "").strip().lower()
+        alias_map = {
+            "柱状图": "bar",
+            "条形图": "bar",
+            "折线图": "line",
+            "曲线图": "line",
+            "面积图": "area",
+            "饼图": "pie",
+            "散点图": "scatter",
+            "热力图": "heatmap",
+            "分组柱状图": "grouped_bar",
+            "堆叠柱状图": "stacked_bar",
+            "组合图": "combo",
+            "multi-line": "multi_line",
+            "multiline": "multi_line",
+            "stackedbar": "stacked_bar",
+            "groupbar": "grouped_bar",
+        }
+        raw = alias_map.get(raw, raw)
+        if raw in {"scatter_line", "line_scatter"}:
+            raw = "line"
+        try:
+            return ChartType(raw)
+        except Exception:
+            return ChartType.BAR
+
+    def _default_trace_spec_for_chart(self, chart_type: ChartType) -> Tuple[str, Optional[str]]:
+        """根据图表类型给出默认trace.type和mode。"""
+        if chart_type in {ChartType.LINE, ChartType.MULTI_LINE, ChartType.AREA}:
+            return "scatter", "lines+markers"
+        if chart_type == ChartType.SCATTER:
+            return "scatter", "markers"
+        if chart_type == ChartType.PIE:
+            return "pie", None
+        return "bar", None
     
     def _parse_view_response(
         self,
@@ -1853,6 +1992,11 @@ class NewViewGenerator:
             # ⭐修复：返回VisualizationResponse而不是NewViewInfo
             return self._create_fallback_visualization_response(requirement, data_result)
         
+        preferred_chart_types = requirement.get("analysis_workflow", {}).get("preferred_chart_types", [])
+        preferred_chart = preferred_chart_types[0] if preferred_chart_types else None
+        normalized_chart_type = self._normalize_chart_type(preferred_chart or view_config.get("chart_type", "bar"))
+        default_trace_type, default_mode = self._default_trace_spec_for_chart(normalized_chart_type)
+
         # ⭐改进：如果traces为空，使用data_result中的数据
         traces = []
         retrieved_data = data_result.get("retrieved_data", {})
@@ -1931,12 +2075,29 @@ class NewViewGenerator:
                             else:
                                 trace_x = [f"指标{i+1}" for i in range(len(trace_y))]
                 
+                trace_type = str(trace_data.get("type", "")).strip().lower() if trace_data.get("type") else ""
+                # LLM返回line时，转为plotly可用的scatter+mode
+                if trace_type in {"line", "折线图"}:
+                    trace_type = "scatter"
+                if trace_type in {"柱状图", "bar"}:
+                    trace_type = "bar"
+                if trace_type not in {"bar", "scatter", "pie", "heatmap"}:
+                    trace_type = default_trace_type
+
+                trace_mode = trace_data.get("mode")
+                if not trace_mode and trace_type == "scatter":
+                    trace_mode = default_mode or "lines+markers"
+
                 trace = ChartTrace(
                     name=trace_data.get("name", "数据"),
                     x=trace_x,
                     y=trace_y,
-                    type=trace_data.get("type", "bar"),
-                    mode=trace_data.get("mode")
+                    type=trace_type,
+                    mode=trace_mode,
+                    text=trace_data.get("text"),
+                    marker=trace_data.get("marker"),
+                    line=trace_data.get("line"),
+                    hovertemplate=trace_data.get("hovertemplate")
                 )
                 traces.append(trace)
         else:
@@ -1985,7 +2146,8 @@ class NewViewGenerator:
                         name=s.get("name", "系列"),
                         x=series_labels,
                         y=series_values,
-                        type="bar"
+                        type=default_trace_type,
+                        mode=default_mode
                     ))
             elif values:
                 # 单系列数据
@@ -2018,7 +2180,8 @@ class NewViewGenerator:
                     name="数据",
                     x=final_labels,
                     y=values,
-                    type="bar"
+                    type=default_trace_type,
+                    mode=default_mode
                 ))
             else:
                 # 完全没有数据，创建空视图
@@ -2026,7 +2189,8 @@ class NewViewGenerator:
                     name="数据",
                     x=["暂无数据"],
                     y=[0],
-                    type="bar"
+                    type=default_trace_type,
+                    mode=default_mode
                 ))
         
         # 构建ChartLayout（Y 轴带单位、图例显示）
@@ -2045,11 +2209,7 @@ class NewViewGenerator:
         )
         
         # 构建PlotlyChartConfig
-        chart_type_str = view_config.get("chart_type", "bar")
-        try:
-            chart_type = ChartType(chart_type_str)
-        except:
-            chart_type = ChartType.BAR  # 默认使用柱状图
+        chart_type = normalized_chart_type
         
         chart_config = PlotlyChartConfig(
             chart_type=chart_type,
@@ -2063,12 +2223,37 @@ class NewViewGenerator:
             description += f"\n\n⚠️ {view_config['data_quality_note']}"
         if view_config.get("missing_data_note"):
             description += f"\n\n📋 缺失数据：{view_config['missing_data_note']}"
+
+        # 透传LLM洞察到前端
+        parsed_insights: List[VisualizationInsight] = []
+        raw_insights = view_config.get("insights", []) if isinstance(view_config.get("insights", []), list) else []
+        for insight_item in raw_insights[:5]:
+            if not isinstance(insight_item, dict):
+                continue
+            try:
+                insight_type = str(insight_item.get("insight_type", "trend")).lower()
+                if insight_type not in {"trend", "comparison", "distribution", "correlation", "anomaly"}:
+                    insight_type = "trend"
+                parsed_insights.append(
+                    VisualizationInsight(
+                        insight_type=insight_type,
+                        description=str(insight_item.get("description", "")).strip() or "基于当前视图生成的洞察",
+                        key_findings=[
+                            str(x).strip()
+                            for x in insight_item.get("key_findings", [])
+                            if str(x).strip()
+                        ][:5] or ["待补充关键发现"]
+                    )
+                )
+            except Exception:
+                continue
         
         return VisualizationResponse(
             query=requirement.get("view_description", ""),
             answer=description,
             has_visualization=True,  # ⭐确保has_visualization为True
             chart_config=chart_config,
+            insights=parsed_insights or None,
             data_source="view_linkage"
         )
     
@@ -2188,7 +2373,12 @@ class NewViewGenerator:
         retrieved_data = data_result.get("retrieved_data", {})
         labels = retrieved_data.get("labels", [])
         values = retrieved_data.get("values", [])
-        series = retrieved_data.get("series", [])
+        series = []
+        for s in (retrieved_data.get("series", []) or []):
+            s_name = str(s.get("name", "")).strip().lower()
+            if s_name in {"年份", "year"}:
+                continue
+            series.append(s)
         display_unit = retrieved_data.get("display_unit") or retrieved_data.get("unit", "")
         y_title = f"数值({display_unit})" if display_unit else "数值"
         
@@ -2197,7 +2387,20 @@ class NewViewGenerator:
             labels = ["暂无数据"]
             values = [0]
         
-        # 构建traces（图例使用系列名称）
+        # 构建traces（图例使用系列名称）并尽量按数据特征选择图表类型
+        preferred_chart_types = requirement.get("analysis_workflow", {}).get("preferred_chart_types", [])
+        if preferred_chart_types:
+            fallback_chart_type = self._normalize_chart_type(preferred_chart_types[0])
+        else:
+            is_time_axis = any(re.search(r'20\d{2}|Q[1-4]|第[一二三四1-4]季度', str(lb)) for lb in labels[:4])
+            if is_time_axis:
+                fallback_chart_type = ChartType.LINE
+            elif series and len(series) > 1:
+                fallback_chart_type = ChartType.GROUPED_BAR
+            else:
+                fallback_chart_type = ChartType.BAR
+        fallback_trace_type, fallback_mode = self._default_trace_spec_for_chart(fallback_chart_type)
+
         traces = []
         if series:
             # 多系列数据，每个系列名称作为图例项
@@ -2207,7 +2410,8 @@ class NewViewGenerator:
                     name=name,
                     x=labels if labels else [f"点{i+1}" for i in range(len(s.get("values", [])))],
                     y=s.get("values", []),
-                    type="bar"
+                    type=fallback_trace_type,
+                    mode=fallback_mode
                 ))
         else:
             # 单系列数据
@@ -2215,7 +2419,8 @@ class NewViewGenerator:
                 name="数据",
                 x=labels if labels else [f"点{i+1}" for i in range(len(values))],
                 y=values if values else [0],
-                type="bar"
+                type=fallback_trace_type,
+                mode=fallback_mode
             ))
         
         layout = ChartLayout(
@@ -2227,7 +2432,7 @@ class NewViewGenerator:
         )
         
         chart_config = PlotlyChartConfig(
-            chart_type=ChartType.BAR,
+            chart_type=fallback_chart_type,
             traces=traces,
             layout=layout
         )
@@ -3475,4 +3680,3 @@ class SingleCardLinkageEngine:
             })
         
         return network
-

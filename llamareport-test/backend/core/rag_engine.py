@@ -101,14 +101,16 @@ class RAGEngine:
                     return False
                 
                 deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-                
+                # 单次请求超时（秒）：盈利预测等长输出易超时，默认 60 秒过短，改为 600 秒
+                llm_timeout = float(os.getenv("LLM_TIMEOUT", "600"))
                 Settings.llm = DeepSeek(
                     model=deepseek_model,
                     api_key=deepseek_api_key,
-                    temperature=0.1
+                    temperature=0.1,
+                    timeout=llm_timeout
                 )
                 
-                logger.info(f"✅ DeepSeek LLM配置成功 - 模型: {deepseek_model}")
+                logger.info(f"✅ DeepSeek LLM配置成功 - 模型: {deepseek_model}, 超时: {llm_timeout}秒")
                 llm_name = "DeepSeek"
 
             # 设置嵌入模型 - 继续使用 OpenAI

@@ -2,6 +2,32 @@
   <Card title="可视化视图" icon="📊" :status="status" empty-text="暂无可视化数据">
     <template #default>
       <div class="visualization-panel-container">
+        <div v-if="showDrillModal" class="drill-modal-mask" @click.self="cancelDrillAnalysis">
+          <div class="drill-modal">
+            <div class="drill-modal-header">
+              <h3>数据点下钻分析</h3>
+            </div>
+            <div class="drill-modal-body">
+              <p class="drill-modal-tip">
+                已选中数据点：<strong>{{ pendingDrillRequest?.drillContext?.clicked_point?.x }}</strong>
+                /
+                <strong>{{ pendingDrillRequest?.drillContext?.clicked_point?.label || pendingDrillRequest?.drillContext?.clicked_point?.series_name || '数据点' }}</strong>
+                （值：<strong>{{ pendingDrillRequest?.drillContext?.clicked_point?.y }}</strong>）
+              </p>
+              <textarea
+                v-model="drillDraftQuestion"
+                class="drill-modal-textarea"
+                rows="5"
+                placeholder="可编辑分析问题，点击执行后开始下钻分析"
+              ></textarea>
+            </div>
+            <div class="drill-modal-actions">
+              <button class="drill-btn drill-btn-cancel" @click="cancelDrillAnalysis">取消</button>
+              <button class="drill-btn drill-btn-run" @click="confirmDrillAnalysis">执行分析</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 浮动操作栏（当有卡片被选中时显示，包括仅选中杜邦分析） -->
         <div v-if="selectedViewsCount > 0" class="floating-action-bar" :style="{ display: 'block' }">
           <div class="action-bar-content">
@@ -200,6 +226,7 @@
             v-for="card in displayCards" 
             :key="card.id || `card-${card.timestamp?.getTime() || Date.now()}`" 
             class="viz-card chart-card"
+            :data-view-id="card.id"
             :class="{ 
               'selected': isCardSelected(card.id), 
               'linkage-card': card.isLinkageGenerated,
@@ -227,6 +254,22 @@
                 </span>
               </div>
               <div class="viz-card-actions">
+                <button
+                  v-if="hasDrillAnnotation(card.id)"
+                  class="viz-card-clear-drill"
+                  @click.stop="clearDrillAnnotation(card.id)"
+                  title="清除数据点标注"
+                >
+                  清除标注
+                </button>
+                <button
+                  v-if="hasDrillHistory(card.id)"
+                  class="viz-card-drill-back"
+                  @click.stop="goBackDrill(card.id)"
+                  title="返回上一层钻取"
+                >
+                  返回上一层
+                </button>
                 <button class="viz-card-close" @click.stop="removeCard(card.id, $event)" title="删除">×</button>
               </div>
             </div>
@@ -539,7 +582,12 @@ export default {
       generatingAnalysis: false,
       selectedDupontYear: null,
       explorationQuestion: '',  // 探索问题
-      recommendedQuestions: []  // 推荐问题（基于选中卡片）
+      recommendedQuestions: [],  // 推荐问题（基于选中卡片）
+      drillHistoryByView: {},  // 按视图ID存储钻取历史
+      activeDrillByView: {},  // 当前高亮数据点信息
+      showDrillModal: false,
+      drillDraftQuestion: '',
+      pendingDrillRequest: null
     }
   },
   computed: {
@@ -1028,6 +1076,9 @@ export default {
             
             window.Plotly.newPlot(chartElementId, traces, layout, config);
             console.log(`✅ 图表渲染成功: ${chartElementId}`);
+            if (cardId) {
+              this.bindDataPointDrillEvent(cardId, chartData, chartElementId);
+            }
           } else {
             console.warn('Plotly未加载，无法渲染图表');
           }
@@ -1040,6 +1091,222 @@ export default {
           }
         }
       });
+    },
+    bindDataPointDrillEvent(cardId, chartData, chartElementId) {
+      const chartElement = document.getElementById(chartElementId);
+      if (!chartElement || typeof chartElement.on !== 'function') {
+        return;
+      }
+
+      chartElement.removeAllListeners?.('plotly_click');
+      chartElement.on('plotly_click', (eventData) => {
+        try {
+          this.handleDataPointDrill(cardId, chartData, eventData);
+        } catch (error) {
+          console.error('数据点钻取处理失败:', error);
+        }
+      });
+    },
+    handleDataPointDrill(cardId, chartData, eventData) {
+      if (!eventData || !Array.isArray(eventData.points) || eventData.points.length === 0) {
+        return;
+      }
+
+      const point = eventData.points[0];
+      const clickedPoint = {
+        x: point.x,
+        y: point.y,
+        label: point.data?.name || '',
+        series_name: point.fullData?.name || '',
+        point_index: point.pointIndex,
+        trace_index: point.curveNumber
+      };
+
+      const drillType = this.inferDrillType(point, chartData?.chart_config);
+      const drillContext = {
+        interaction_type: 'data_point_drill',
+        clicked_point: clickedPoint,
+        drill_type: drillType,
+        chart_info: {
+          chart_type: chartData?.chart_config?.chart_type || '',
+          key_metrics: this.extractCardKeyMetrics(cardId, chartData),
+          title: chartData?.chart_config?.layout?.title || ''
+        }
+      };
+
+      this.highlightDataPoint(cardId, clickedPoint);
+      this.recordDrillHistory(cardId, drillContext);
+      this.openDrillModal(cardId, drillContext);
+    },
+    inferDrillType(point, chartConfig) {
+      const xValue = point?.x;
+      const yValue = Number(point?.y);
+      const chartType = String(chartConfig?.chart_type || point?.fullData?.type || '').toLowerCase();
+
+      const isTimeSeries = /^\d{4}/.test(String(xValue || '')) || /Q\d/.test(String(xValue || ''));
+      const avgY = this.calculateAverageY(chartConfig);
+      const isAnomaly = Number.isFinite(yValue) && Number.isFinite(avgY) && avgY !== 0 && Math.abs(yValue - avgY) > Math.abs(avgY) * 0.3;
+
+      if (chartType === 'pie') return 'category_drill';
+      if (isTimeSeries) return 'time_drill';
+      if (isAnomaly) return 'anomaly_analysis';
+      return 'general_drill';
+    },
+    calculateAverageY(chartConfig) {
+      const traces = chartConfig?.traces || [];
+      const values = [];
+      traces.forEach((trace) => {
+        (trace?.y || []).forEach((y) => {
+          const n = Number(y);
+          if (Number.isFinite(n)) values.push(n);
+        });
+      });
+      if (values.length === 0) return NaN;
+      return values.reduce((sum, n) => sum + n, 0) / values.length;
+    },
+    extractCardKeyMetrics(cardId, cardData) {
+      const card = this.visualizationCards.find(item => item.id === cardId);
+      const fromQuestion = String(card?.question || '')
+        .split(/[：:、，,\s]/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .slice(0, 2);
+      if (fromQuestion.length > 0) {
+        return fromQuestion;
+      }
+      const yAxis = cardData?.chart_config?.layout?.yaxis_title;
+      return yAxis ? [String(yAxis)] : [];
+    },
+    triggerDataPointDrill(cardId, drillContext, customQuestion = null) {
+      const card = this.visualizationCards.find(item => item.id === cardId);
+      if (!card) {
+        return;
+      }
+
+      const drillQuestion = (customQuestion || '').trim() || this.buildDrillQuestion(drillContext);
+      this.generatingAnalysis = true;
+      this.$emit(
+        'generate-comprehensive-analysis',
+        [{
+          id: card.id,
+          question: card.question,
+          data: card.data || {}
+        }],
+        drillQuestion,
+        drillContext
+      );
+    },
+    openDrillModal(cardId, drillContext) {
+      this.pendingDrillRequest = { cardId, drillContext };
+      this.drillDraftQuestion = this.buildDrillQuestion(drillContext);
+      this.showDrillModal = true;
+    },
+    cancelDrillAnalysis() {
+      const pendingCardId = this.pendingDrillRequest?.cardId;
+      if (pendingCardId) {
+        this.clearDrillAnnotation(pendingCardId);
+      }
+      this.showDrillModal = false;
+      this.drillDraftQuestion = '';
+      this.pendingDrillRequest = null;
+    },
+    confirmDrillAnalysis() {
+      if (!this.pendingDrillRequest) {
+        return;
+      }
+      const { cardId, drillContext } = this.pendingDrillRequest;
+      const question = (this.drillDraftQuestion || '').trim() || this.buildDrillQuestion(drillContext);
+      this.showDrillModal = false;
+      this.pendingDrillRequest = null;
+      this.drillDraftQuestion = '';
+      this.triggerDataPointDrill(cardId, drillContext, question);
+    },
+    buildDrillQuestion(drillContext) {
+      const drillType = drillContext?.drill_type || 'general_drill';
+      const point = drillContext?.clicked_point || {};
+      const label = point.label || point.series_name || '该数据点';
+      const x = point.x ?? '-';
+      const y = point.y ?? '-';
+
+      if (drillType === 'time_drill') {
+        return `请围绕时间点 ${x} 下钻分析 ${label} 的变化原因，并对比前后阶段。`;
+      }
+      if (drillType === 'category_drill') {
+        return `请对分类 ${label} 做下钻分析，说明构成、驱动因素及和其他分类差异。`;
+      }
+      if (drillType === 'anomaly_analysis') {
+        return `数据点 ${x}/${label}（值 ${y}）疑似异常，请解释原因、影响及验证方式。`;
+      }
+      return `请对数据点 ${x}/${label}（值 ${y}）进行下钻分析并给出关键结论。`;
+    },
+    highlightDataPoint(cardId, clickedPoint) {
+      const plotlyDiv = document.getElementById(`chart-${cardId}`);
+      if (!plotlyDiv || !window.Plotly) return;
+
+      const annotation = {
+        x: clickedPoint.x,
+        y: clickedPoint.y,
+        text: '📍 已选中',
+        showarrow: true,
+        arrowhead: 2,
+        arrowsize: 1,
+        arrowwidth: 2,
+        arrowcolor: '#FF6B6B',
+        font: { size: 12, color: '#FF6B6B' },
+        bgcolor: 'rgba(255, 255, 255, 0.9)',
+        bordercolor: '#FF6B6B',
+        borderwidth: 2
+      };
+
+      window.Plotly.relayout(plotlyDiv, { annotations: [annotation] });
+      this.activeDrillByView = {
+        ...this.activeDrillByView,
+        [cardId]: clickedPoint
+      };
+    },
+    clearDrillAnnotation(cardId) {
+      const plotlyDiv = document.getElementById(`chart-${cardId}`);
+      if (plotlyDiv && window.Plotly) {
+        window.Plotly.relayout(plotlyDiv, { annotations: [] });
+      }
+      const nextActive = { ...this.activeDrillByView };
+      delete nextActive[cardId];
+      this.activeDrillByView = nextActive;
+    },
+    recordDrillHistory(cardId, drillContext) {
+      const history = this.drillHistoryByView[cardId] || [];
+      const nextHistory = [...history, { drill_context: drillContext, timestamp: new Date() }];
+      this.drillHistoryByView = {
+        ...this.drillHistoryByView,
+        [cardId]: nextHistory
+      };
+    },
+    goBackDrill(cardId) {
+      const history = this.drillHistoryByView[cardId] || [];
+      if (history.length === 0) {
+        this.clearDrillAnnotation(cardId);
+        return;
+      }
+
+      const nextHistory = history.slice(0, -1);
+      this.drillHistoryByView = {
+        ...this.drillHistoryByView,
+        [cardId]: nextHistory
+      };
+
+      const previous = nextHistory[nextHistory.length - 1];
+      if (previous?.drill_context?.clicked_point) {
+        this.highlightDataPoint(cardId, previous.drill_context.clicked_point);
+      } else {
+        this.clearDrillAnnotation(cardId);
+      }
+    },
+    hasDrillHistory(cardId) {
+      const history = this.drillHistoryByView[cardId] || [];
+      return history.length > 1;
+    },
+    hasDrillAnnotation(cardId) {
+      return !!this.activeDrillByView[cardId];
     },
     renderSankeyChart(chartElementId, chartConfig) {
       try {
