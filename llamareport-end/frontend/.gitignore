@@ -1,0 +1,11 @@
+# 临时文件
+*.tmp
+*.bak
+*~
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+

@@ -1,0 +1,230 @@
+{
+  "banking": {
+    "retail_banking": {
+      "required": [
+        {
+          "name": "零售营业收入",
+          "dimension": "scale",
+          "purpose": "判断是否为全行收入主要拖累或支撑"
+        },
+        {
+          "name": "零售净利润",
+          "dimension": "profitability",
+          "purpose": "判断是否出现利润塌陷或集中减值"
+        },
+        {
+          "name": "个人贷款余额",
+          "dimension": "structure",
+          "purpose": "区分需求塌陷与主动风险压降"
+        }
+      ],
+      "optional": [
+        {
+          "name": "信用卡贷款余额",
+          "dimension": "risk_structure",
+          "purpose": "判断高风险资产是否被压降"
+        },
+        {
+          "name": "零售不良率",
+          "dimension": "risk",
+          "purpose": "判断资产质量是否失控"
+        },
+        {
+          "name": "零售减值损失",
+          "dimension": "risk",
+          "purpose": "判断利润下滑是否来自风险出清"
+        },
+        {
+          "name": "零售AUM",
+          "dimension": "strategy",
+          "purpose": "判断是否向轻资本/财富管理转型"
+        },
+        {
+          "name": "私行客户数或私行AUM",
+          "dimension": "strategy",
+          "purpose": "判断高净值客户是否稳住"
+        }
+      ]
+    },
+    "corporate_banking": {
+      "required": [
+        {
+          "name": "企业贷款余额",
+          "dimension": "scale",
+          "purpose": "判断是否托住全行资产规模"
+        },
+        {
+          "name": "对公存款余额",
+          "dimension": "structure",
+          "purpose": "判断是否形成低成本资金协同"
+        }
+      ],
+      "optional": [
+        {
+          "name": "对公不良率",
+          "dimension": "risk",
+          "purpose": "判断增长是否以量换风险"
+        },
+        {
+          "name": "行业投向结构",
+          "dimension": "structure",
+          "purpose": "判断是否集中于高风险行业"
+        },
+        {
+          "name": "大客户集中度",
+          "dimension": "risk",
+          "purpose": "判断单一客户风险暴露"
+        },
+        {
+          "name": "对公客户数",
+          "dimension": "strategy",
+          "purpose": "判断增长是否具备可持续性"
+        },
+        {
+          "name": "新兴行业贷款占比",
+          "dimension": "strategy",
+          "purpose": "判断是否承接政策红利"
+        },
+        {
+          "name": "供应链金融发生额",
+          "dimension": "strategy",
+          "purpose": "判断是否转向经营型对公"
+        }
+      ]
+    },
+    "interbank_treasury": {
+      "required": [
+        {
+          "name": "投资收益",
+          "dimension": "profitability",
+          "purpose": "判断非息是否对冲息差"
+        },
+        {
+          "name": "其他非息收入",
+          "dimension": "structure",
+          "purpose": "判断是否形成第二收入曲线"
+        }
+      ],
+      "optional": [
+        {
+          "name": "债券交易量",
+          "dimension": "capability",
+          "purpose": "判断是否具备市场定价能力"
+        },
+        {
+          "name": "市场份额或排名",
+          "dimension": "capability",
+          "purpose": "判断收益是否能力驱动"
+        },
+        {
+          "name": "托管规模",
+          "dimension": "strategy",
+          "purpose": "判断是否从自营走向平台"
+        }
+      ]
+    }
+  },
+  "insurance": {
+    "life_insurance": {
+      "required": [
+        {
+          "name": "原保费收入",
+          "dimension": "scale",
+          "purpose": "衡量寿险业务规模"
+        }
+      ],
+      "optional": [
+        {
+          "name": "新单保费",
+          "dimension": "structure",
+          "purpose": "判断新业务增长能力"
+        },
+        {
+          "name": "退保率",
+          "dimension": "risk",
+          "purpose": "判断客户稳定性"
+        },
+        {
+          "name": "内含价值EV",
+          "dimension": "strategy",
+          "purpose": "判断长期价值创造能力"
+        }
+      ]
+    }
+  },
+  "securities": {
+    "brokerage": {
+      "required": [
+        {
+          "name": "成交额",
+          "dimension": "scale",
+          "purpose": "衡量市场活跃度"
+        },
+        {
+          "name": "佣金收入",
+          "dimension": "profitability",
+          "purpose": "衡量经纪业务盈利能力"
+        }
+      ],
+      "optional": [
+        {
+          "name": "两融余额",
+          "dimension": "risk",
+          "purpose": "判断杠杆风险暴露"
+        }
+      ]
+    }
+  },
+  "manufacturing": {
+    "core_products": {
+      "required": [
+        {
+          "name": "产品收入",
+          "dimension": "scale",
+          "purpose": "衡量核心业务体量"
+        }
+      ],
+      "optional": [
+        {
+          "name": "毛利率",
+          "dimension": "structure",
+          "purpose": "衡量产品竞争力"
+        },
+        {
+          "name": "新产品收入占比",
+          "dimension": "strategy",
+          "purpose": "衡量长期成长性"
+        }
+      ]
+    }
+  },
+  "internet_platform": {
+    "c_end_business": {
+      "required": [
+        {
+          "name": "MAU",
+          "dimension": "scale",
+          "purpose": "衡量用户规模"
+        },
+        {
+          "name": "业务收入",
+          "dimension": "scale",
+          "purpose": "衡量变现能力"
+        }
+      ],
+      "optional": [
+        {
+          "name": "ARPU",
+          "dimension": "structure",
+          "purpose": "衡量单用户价值"
+        },
+        {
+          "name": "留存率",
+          "dimension": "strategy",
+          "purpose": "衡量长期用户质量"
+        }
+      ]
+    }
+  }
+}
+
