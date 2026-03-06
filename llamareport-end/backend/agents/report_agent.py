@@ -622,7 +622,7 @@ class ReportAgent:
                 }
 
             # 使用query管线，确保可视化与精简输出一致
-            result = await self.query(query)
+            result = await self.query(query, query_type="section", enable_visualization=False)
 
             # 业绩指引：如果没有可视化，则基于分析文本补充可视化（图文结合）
             if section_name == "business_guidance" and not result.get("visualization"):
@@ -927,6 +927,18 @@ class ReportAgent:
                                         f"- ③ 关键执行路径：{how_text}",
                                         f"- ④ 不确定性与边界：{risk_text}"
                                     ])
+                                    perf_stats = raw_output.get("perf_stats") or {}
+                                    if isinstance(perf_stats, dict) and perf_stats:
+                                        logger.info(
+                                            "[PERF][business_guidance] "
+                                            f"retrieval_time={perf_stats.get('retrieval_time_seconds')}s, "
+                                            f"llm_time={perf_stats.get('llm_time_seconds')}s, "
+                                            f"total_time={perf_stats.get('total_time_seconds')}s, "
+                                            f"retrieval_count={perf_stats.get('retrieval_count')}, "
+                                            f"llm_calls_insight={perf_stats.get('llm_calls_insight')}, "
+                                            f"llm_calls_visualization={perf_stats.get('llm_calls_visualization')}, "
+                                            f"llm_calls_total={perf_stats.get('llm_calls_total')}"
+                                        )
                                 elif tool_name == "generate_business_highlights":
                                     overall_summary = raw_output.get("overall_summary")
                                     segment_tables = raw_output.get("segment_tables") or []
@@ -1058,10 +1070,34 @@ class ReportAgent:
                                         import json
                                         raw_output = json.loads(raw_output)
                                     except Exception:
-                                        raw_output = {}
+                                        try:
+                                            import re
+                                            match = re.search(r'\{[\s\S]*\}', raw_output)
+                                            if match:
+                                                raw_output = json.loads(match.group(0))
+                                            else:
+                                                raw_output = {}
+                                        except Exception:
+                                            raw_output = {}
+                                        if not raw_output:
+                                            logger.warning(
+                                                "[business_guidance] raw_output 为字符串但 JSON 解析失败，前端将依赖 raw_output 原文解析"
+                                            )
                                 if isinstance(raw_output, dict):
+                                    before_keys = set(tool_output_serializable.keys())
                                     for key, value in raw_output.items():
                                         tool_output_serializable.setdefault(key, value)
+                                    added = set(tool_output_serializable.keys()) - before_keys
+                                    if added:
+                                        logger.info(
+                                            "[business_guidance] 已从 raw_output 展开 %d 个键: %s",
+                                            len(added),
+                                            list(added)[:15],
+                                        )
+                                    elif raw_output and "key_metrics" in raw_output:
+                                        logger.warning(
+                                            "[business_guidance] raw_output 含 key_metrics 但未展开，请检查类型"
+                                        )
 
                             tool_results.append(tool_result)
                             
@@ -1378,6 +1414,38 @@ class ReportAgent:
                 "tool_calls": tool_results if tool_results else []  # 确保是列表
             }
 
+            # 业绩指引：将 raw_output 合并到 tool_output 顶层，确保前端一定能拿到 key_metrics 等（LlamaIndex 包装后顶层缺失）
+            for tc in result.get("tool_calls") or []:
+                if tc.get("tool_name") != "generate_business_guidance":
+                    continue
+                out = tc.get("tool_output")
+                if not isinstance(out, dict):
+                    continue
+                raw = out.get("raw_output")
+                if raw is None:
+                    continue
+                parsed = None
+                if isinstance(raw, dict):
+                    parsed = raw
+                elif isinstance(raw, str):
+                    raw_stripped = raw.strip()
+                    try:
+                        import json
+                        parsed = json.loads(raw_stripped)
+                    except Exception:
+                        try:
+                            match = re.search(r'\{[\s\S]*\}', raw_stripped)
+                            if match:
+                                parsed = json.loads(match.group(0))
+                        except Exception:
+                            pass
+                if isinstance(parsed, dict):
+                    for key in ("key_metrics", "business_specific_guidance", "risk_warnings",
+                                "guidance_period", "expected_performance", "visualization_spec", "visualization_insights", "extracted_data"):
+                        if key in parsed and out.get(key) is None:
+                            out[key] = parsed[key]
+                    logger.info("[business_guidance] 已在返回前将 raw_output 合并到 tool_output 顶层")
+
             # 如果有可视化数据，添加到响应中
             if enable_visualization and visualization_data:
                 logger.info("[Agent Query] Adding visualization data to response")
@@ -1456,6 +1524,36 @@ class ReportAgent:
             else:
                 logger.info(f"✅ [Agent Query] 准备返回 {len(tool_results)} 个工具调用结果")
 
+            # 汇总并打印后端性能统计（检索/LLM/总耗时/调用次数）
+            perf_retrieval_time = 0.0
+            perf_llm_time = 0.0
+            perf_retrieval_count = 0
+            perf_insight_calls = 0
+            perf_viz_llm_calls = 0
+            perf_viz_tool_calls = 0
+
+            for tool_result in tool_results:
+                tool_name = tool_result.get("tool_name")
+                if tool_name == "generate_visualization":
+                    perf_viz_tool_calls += 1
+
+                tool_output = tool_result.get("tool_output")
+                perf_stats = None
+                if isinstance(tool_output, dict):
+                    perf_stats = tool_output.get("perf_stats")
+                    if not isinstance(perf_stats, dict):
+                        raw_output = tool_output.get("raw_output")
+                        if isinstance(raw_output, dict):
+                            perf_stats = raw_output.get("perf_stats")
+                if not isinstance(perf_stats, dict):
+                    continue
+
+                perf_retrieval_time += float(perf_stats.get("retrieval_time_seconds") or 0.0)
+                perf_llm_time += float(perf_stats.get("llm_time_seconds") or 0.0)
+                perf_retrieval_count += int(perf_stats.get("retrieval_count") or 0)
+                perf_insight_calls += int(perf_stats.get("llm_calls_insight") or 0)
+                perf_viz_llm_calls += int(perf_stats.get("llm_calls_visualization") or 0)
+
             total_time = time.time() - query_start_time
             logger.info(f"✅ [Agent Query] Query completed successfully in {total_time:.2f}秒 with {len(tool_results)} tool calls")
             
@@ -1469,6 +1567,21 @@ class ReportAgent:
                 "tool_calls_count": len(tool_results),
                 "tool_calls_time": total_tool_time if tool_results else 0
             }
+
+            perf_total_viz_calls = perf_viz_llm_calls + perf_viz_tool_calls
+            perf_total_llm_calls = perf_insight_calls + perf_total_viz_calls
+            perf_line = (
+                "[PERF][backend_summary] "
+                f"retrieval_time={perf_retrieval_time:.2f}s, "
+                f"llm_time={perf_llm_time:.2f}s, "
+                f"total_output_time={total_time:.2f}s, "
+                f"retrieval_count={perf_retrieval_count}, "
+                f"llm_calls_insight={perf_insight_calls}, "
+                f"llm_calls_visualization={perf_total_viz_calls}, "
+                f"llm_calls_total={perf_total_llm_calls}"
+            )
+            logger.info(perf_line)
+            print(perf_line)
             
             return result
 

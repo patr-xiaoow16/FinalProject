@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Annotated, Optional, List
 
 import json
+import os
 import re
 import asyncio
 import time
@@ -26,9 +27,12 @@ from agents.business_schema_templates import get_business_schema, BUSINESS_SCHEM
 
 logger = logging.getLogger(__name__)
 
-MAX_TOTAL_SECONDS = 180
-QUERY_TIMEOUT_SECONDS = 35
-LLM_TIMEOUT_SECONDS = 45
+MAX_TOTAL_SECONDS = int(os.getenv("BH_MAX_TOTAL_SECONDS", "110"))
+QUERY_TIMEOUT_SECONDS = int(os.getenv("BH_QUERY_TIMEOUT_SECONDS", "14"))
+LLM_TIMEOUT_SECONDS = int(os.getenv("BH_LLM_TIMEOUT_SECONDS", "22"))
+ENABLE_RULE_ENRICH = os.getenv("BH_ENABLE_RULE_ENRICH", "0") == "1"
+RULE_ENRICH_MAX_QUERIES = int(os.getenv("BH_RULE_ENRICH_MAX_QUERIES", "4"))
+INDUSTRY_LLM_MIN_TEXT_LEN = int(os.getenv("BH_INDUSTRY_LLM_MIN_TEXT_LEN", "180"))
 METRIC_RULES_PATH = Path(__file__).resolve().parent / "business_metric_rules.json"
 
 
@@ -99,6 +103,30 @@ def _infer_industry_from_company_name(company_name: str) -> Optional[str]:
     return None
 
 
+def _infer_industry_from_overview_text(overview_text: str) -> Optional[str]:
+    text = str(overview_text or "")
+    if not text:
+        return None
+    keyword_map = {
+        "banking": ["净息差", "不良贷款率", "拨备覆盖率", "资本充足率", "对公贷款", "零售银行"],
+        "insurance": ["原保费", "赔付", "退保", "寿险", "财险", "综合成本率"],
+        "securities": ["经纪业务", "投行业务", "资管计划", "两融", "自营"],
+        "internet_platform": ["gmv", "mau", "平台商家", "广告变现", "在线营销"],
+        "manufacturing": ["产能", "产量", "销量", "订单", "生产线", "毛利率"],
+    }
+    text_l = text.lower()
+    best_industry = None
+    best_score = 0
+    for industry, keywords in keyword_map.items():
+        score = sum(1 for kw in keywords if kw.lower() in text_l)
+        if score > best_score:
+            best_score = score
+            best_industry = industry
+    if best_score >= 2:
+        return best_industry
+    return None
+
+
 def _map_dimension_to_category(dimension: str) -> str:
     dim = (dimension or "").lower()
     if "profit" in dim or "盈利" in dim:
@@ -151,7 +179,7 @@ async def _enrich_metrics_with_rules(
     if not metrics_mapping.get("segments"):
         return metrics_mapping
 
-    max_queries = 12
+    max_queries = max(0, RULE_ENRICH_MAX_QUERIES)
     query_count = 0
 
     for segment in metrics_mapping.get("segments", []):
@@ -267,6 +295,91 @@ def _extract_llm_content(raw_response: Any) -> str:
     if hasattr(raw_response, 'content'):
         return str(raw_response.content)
     return str(raw_response)
+
+
+def _build_segment_rules(schema: Dict[str, Any], industry: str) -> Dict[str, Any]:
+    segment_rules = {}
+    for segment in schema.get("segments", []):
+        segment_id = segment.get("segment_id")
+        if not segment_id:
+            continue
+        rule = _get_metric_rule(industry, segment_id)
+        if rule:
+            segment_rules[segment_id] = rule
+    return segment_rules
+
+
+async def _select_segments_and_map_metrics(
+    llm: Any,
+    industry: str,
+    schema: Dict[str, Any],
+    business_data: str,
+    overview_data: str,
+    segment_rules: Dict[str, Any]
+) -> Dict[str, Any]:
+    prompt = f"""
+你是企业年报“业务结构识别 + 指标映射”模块，必须一次输出完整JSON。
+
+输入：
+industry = {industry}
+segments template =
+{json.dumps(schema, ensure_ascii=False)}
+
+annual report business snippets =
+<<<
+{business_data}
+>>>
+
+annual report overview snippets =
+<<<
+{overview_data}
+>>>
+
+metric rules =
+{json.dumps(segment_rules, ensure_ascii=False)}
+
+请严格输出JSON：
+{{
+  "industry": "{industry}",
+  "selected_segments": ["segment_id1","segment_id2"],
+  "reasoning": ["..."],
+  "evidence": ["..."],
+  "segments": [
+    {{
+      "segment_id": "retail_banking",
+      "segment_name": "零售银行业务",
+      "mapped_metrics": {{
+        "scale": [{{"metric": "指标名", "current_year": "值", "previous_year": "值", "yoy_change": "xx%", "evidence": "证据"}}],
+        "profitability": [],
+        "risk": [],
+        "efficiency": []
+      }},
+      "business_scope_evidence": ["证据1", "证据2"]
+    }}
+  ],
+  "notes": "无法匹配的说明"
+}}
+
+约束：
+1) selected_segments 只能从模板的 segment_id 中选择。
+2) segments 里的 segment_id 也只能来自模板；如无把握可空数组。
+3) 不得编造数据，缺失用 "/"。
+4) 只输出JSON。
+"""
+    response = await llm.achat([
+        ChatMessage(role="system", content="你是业务结构识别与指标映射助手，必须严格输出JSON。"),
+        ChatMessage(role="user", content=prompt)
+    ])
+    content = _extract_llm_content(response)
+    parsed = _extract_json_from_text(content) or {}
+    return {
+        "industry": industry,
+        "selected_segments": parsed.get("selected_segments") or [],
+        "reasoning": parsed.get("reasoning") or [],
+        "evidence": parsed.get("evidence") or [],
+        "segments": parsed.get("segments") or [],
+        "notes": parsed.get("notes") or "",
+    }
 
 
 async def _classify_industry(
@@ -560,6 +673,75 @@ strategy snippets =
 """
 
 
+def _build_unified_highlights_and_performance_prompt(
+    company_name: str,
+    year: str,
+    industry: str,
+    selected_schema: Dict[str, Any],
+    metrics_mapping: Dict[str, Any],
+    extracted_metrics: list,
+    strategy_data: str
+) -> str:
+    prev_year_label = str(int(year) - 1) if year.isdigit() else "上年"
+    return f"""
+你是资深业务分析师。请一次性输出“业务亮点 + 业务财务战略联动”两部分JSON。
+不得编造数据；无法确认的数值使用"/"；仅输出JSON。
+
+company_name: {company_name}
+year: {year}
+industry: {industry}
+
+selected schema:
+{json.dumps(selected_schema, ensure_ascii=False)}
+
+metrics mapping:
+{json.dumps(metrics_mapping, ensure_ascii=False)}
+
+extracted metrics:
+{json.dumps(extracted_metrics, ensure_ascii=False)}
+
+strategy snippets:
+<<<
+{strategy_data}
+>>>
+
+输出JSON结构（严格遵守）：
+{{
+  "business_highlights": {{
+    "highlights": [
+      {{
+        "business_type": "业务板块",
+        "highlights": "亮点描述",
+        "achievements": ["成就1", "成就2"]
+      }}
+    ],
+    "overall_summary": "总体结论",
+    "key_metrics_summary": {{
+      "title": "关键业务指标汇总",
+      "headers": ["业务板块", "关键指标", "{year}", "{prev_year_label}", "同比变动"],
+      "rows": [["板块", "指标", "值", "值", "值"]]
+    }}
+  }},
+  "business_performance_report": {{
+    "company_name": "{company_name}",
+    "fiscal_year": "{year}",
+    "industry": "{industry}",
+    "overall_summary": "结构变化总结",
+    "segment_insights": [
+      {{
+        "segment_id": "segment_id",
+        "headline": "一句话结论",
+        "contribution": ["对全公司贡献/拖累"],
+        "drivers": ["驱动链条"],
+        "strategy_link": ["战略动作->财务结果"],
+        "risks_and_watchlist": ["风险点+跟踪指标"]
+      }}
+    ]
+  }}
+}}
+"""
+
+
 def _build_extracted_metrics(metrics_mapping: Dict[str, Any]) -> list:
     extracted_list = []
     for segment in metrics_mapping.get("segments", []):
@@ -727,6 +909,165 @@ def _build_key_metrics_summary(segment_tables: list, year: str) -> Dict[str, Any
     }
 
 
+def _safe_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _split_findings(text: str, limit: int = 4) -> List[str]:
+    if not text:
+        return []
+    parts = re.split(r"[。；\n]", str(text))
+    cleaned = [p.strip(" -\t\r") for p in parts if p and p.strip()]
+    return cleaned[:limit]
+
+
+def _build_visualization_payload(
+    segment_tables: List[Dict[str, Any]],
+    key_metrics_summary: Dict[str, Any],
+    performance_report: Dict[str, Any]
+) -> Dict[str, Any]:
+    segment_insights = _safe_list(performance_report.get("segment_insights"))
+
+    growth_items = []
+    strategy_items = []
+    risk_items = []
+    growth_findings: List[str] = []
+    strategy_findings: List[str] = []
+    risk_findings: List[str] = []
+
+    for idx, insight in enumerate(segment_insights):
+        if not isinstance(insight, dict):
+            continue
+        segment_id = insight.get("segment_id") or f"segment-{idx}"
+        segment_name = insight.get("segment_name") or segment_id
+        headline = str(insight.get("headline") or "").strip()
+        contribution = insight.get("contribution")
+        if isinstance(contribution, list):
+            contribution_text = "；".join([str(i).strip() for i in contribution if str(i).strip()])
+        else:
+            contribution_text = str(contribution or "").strip()
+        drivers = insight.get("drivers")
+        if isinstance(drivers, list):
+            drivers_text = "；".join([str(i).strip() for i in drivers if str(i).strip()])
+        else:
+            drivers_text = str(drivers or "").strip()
+
+        growth_items.append({
+            "segment_id": segment_id,
+            "segment_name": segment_name,
+            "headline": headline or "业务亮点待补充",
+            "contribution": contribution_text or "贡献信息待补充",
+        })
+        growth_findings.append(f"{segment_name}：{headline or contribution_text or '亮点待补充'}")
+
+        strategy_links = _safe_list(insight.get("strategy_link"))
+        if strategy_links:
+            strategy_items.append({
+                "segment_id": segment_id,
+                "segment_name": segment_name,
+                "action_count": len(strategy_links),
+                "top_actions": strategy_links[:2],
+            })
+            strategy_findings.append(f"{segment_name}：{'；'.join([str(x) for x in strategy_links[:2]])}")
+        elif drivers_text:
+            strategy_findings.append(f"{segment_name}：{drivers_text}")
+
+        risk_lines = _safe_list(insight.get("risks_and_watchlist"))
+        for line in risk_lines[:2]:
+            line_text = str(line).strip()
+            if not line_text:
+                continue
+            risk_items.append({
+                "risk": line_text,
+                "impact": segment_name,
+                "probability": "中",
+            })
+            risk_findings.append(f"{segment_name}：{line_text}")
+
+    summary_title = str((key_metrics_summary or {}).get("title") or "关键业务指标汇总")
+    overall_summary = str(performance_report.get("overall_summary") or "").strip()
+
+    visualization_spec = {
+        "growth_engine": {
+            "chart_type": "insight_cards",
+            "view_type": "insight_cards",
+            "purpose": "展示各业务板块的一句话结论与贡献",
+            "items": growth_items,
+        },
+        "metric_anchor": {
+            "chart_type": "financial_table",
+            "view_type": "financial_table",
+            "purpose": "展示关键业务指标汇总与分板块指标表",
+            "summary_title": summary_title,
+            "key_metrics_summary_table": key_metrics_summary or {},
+            "segment_tables": [
+                {
+                    "segment_id": table.get("segment_id"),
+                    "segment_name": table.get("segment_name"),
+                    "table": table.get("table"),
+                    "conclusion": table.get("conclusion"),
+                }
+                for table in _safe_list(segment_tables)
+                if isinstance(table, dict)
+            ],
+        },
+        "strategic_execution": {
+            "chart_type": "status_bar",
+            "view_type": "status_bar",
+            "purpose": "展示各业务板块战略动作数量与重点动作",
+            "items": strategy_items,
+        },
+        "uncertainty_boundary": {
+            "chart_type": "risk_matrix",
+            "view_type": "risk_matrix",
+            "purpose": "展示各业务板块风险关注项",
+            "items": risk_items,
+        },
+    }
+
+    visualization_insights = {
+        "growth_engine": {
+            "insights": [{
+                "insight_type": "comparison",
+                "description": overall_summary or "各业务板块呈现差异化增长与贡献特征",
+                "key_findings": growth_findings[:4] or ["业务亮点待补充"],
+                "related_items": [item.get("segment_name") for item in growth_items[:4] if item.get("segment_name")] or ["业务板块"],
+            }]
+        },
+        "metric_anchor": {
+            "insights": [{
+                "insight_type": "trend",
+                "description": "关键业务指标用于锚定各板块当前经营表现",
+                "key_findings": _split_findings("；".join(growth_findings[:4])) or ["关键业务指标待补充"],
+                "related_items": [summary_title],
+            }]
+        },
+        "strategic_execution": {
+            "insights": [{
+                "insight_type": "comparison",
+                "description": "战略动作与经营结果形成映射关系",
+                "key_findings": strategy_findings[:4] or ["战略动作待补充"],
+                "related_items": [item.get("segment_name") for item in strategy_items[:4] if item.get("segment_name")] or ["战略动作"],
+            }]
+        },
+        "uncertainty_boundary": {
+            "insights": [{
+                "insight_type": "anomaly",
+                "description": "风险关注项主要来自各板块经营与资产质量变化",
+                "key_findings": risk_findings[:4] or ["风险关注项待补充"],
+                "related_items": [item.get("impact") for item in risk_items[:4] if item.get("impact")] or ["风险项"],
+            }]
+        },
+    }
+
+    return {
+        "visualization_spec": visualization_spec,
+        "visualization_insights": visualization_insights,
+    }
+
+
 async def generate_business_highlights(
     company_name: Annotated[str, "公司名称"],
     year: Annotated[str, "年份"],
@@ -746,108 +1087,128 @@ async def generate_business_highlights(
         业务亮点的结构化数据
     """
     try:
-        logger.info(f"开始生成业务亮点: {company_name} {year}年")
+        logger.info(f"开始生成业务亮点(提速版): {company_name} {year}年")
         start_time = time.time()
+        retrieval_time = 0.0
+        llm_time = 0.0
+        retrieval_count = 0
+        retrieval_success_count = 0
+        llm_calls_total = 0
 
         def time_remaining() -> float:
             return MAX_TOTAL_SECONDS - (time.time() - start_time)
-        
-        # Step 1: 行业识别（优先公司名规则，减少检索开销）
-        inferred_industry = _infer_industry_from_company_name(company_name)
+
         llm = Settings.llm
-        overview_data = ""
+
+        # Step 1: 三段检索并行执行（overview / business / strategy）
+        overview_query = (
+            f"{company_name} {year}年 公司概况 主营业务描述 行业分类披露 "
+            "证监会行业 中信行业 主营业务范围"
+        )
+        business_query = f"{company_name} {year}年 分部信息 业务板块 业务结构 业务收入 主要产品 服务"
+        strategy_query = f"{company_name} {year}年 发展战略 经营计划 战略规划 竞争优势"
+        retrieval_count += 3
+        q_start = time.time()
+        overview_data, business_data, strategy_data = await asyncio.gather(
+            _run_with_timeout(_run_query_with_timeout(query_engine, overview_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "公司概况检索"),
+            _run_with_timeout(_run_query_with_timeout(query_engine, business_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "业务结构检索"),
+            _run_with_timeout(_run_query_with_timeout(query_engine, strategy_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "战略检索"),
+        )
+        retrieval_time += time.time() - q_start
+        if str(overview_data).strip():
+            retrieval_success_count += 1
+        if str(business_data).strip():
+            retrieval_success_count += 1
+        if str(strategy_data).strip():
+            retrieval_success_count += 1
+
+        # Step 2: 行业识别（规则优先，LLM兜底收紧）
+        inferred_industry = _infer_industry_from_company_name(company_name)
         if inferred_industry:
             industry_result = {
                 "industry": inferred_industry,
-                "confidence": 0.7,
+                "confidence": 0.85,
                 "evidence": ["company_name_rule"]
             }
-            logger.info(f"🔁 [business_highlights] 行业识别命中规则: {inferred_industry}")
         else:
-            overview_query = (
-                f"{company_name} {year}年 公司概况 主营业务描述 行业分类披露 "
-                "证监会行业 中信行业 主营业务范围"
-            )
-            if time_remaining() <= 0:
-                raise TimeoutError("业务亮点生成超时，提前结束")
-            try:
-                overview_data = await _run_query_with_timeout(
-                    query_engine,
-                    overview_query,
-                    QUERY_TIMEOUT_SECONDS
+            heuristic_industry = _infer_industry_from_overview_text(overview_data)
+            if heuristic_industry:
+                industry_result = {
+                    "industry": heuristic_industry,
+                    "confidence": 0.75,
+                    "evidence": ["overview_keyword_rule"]
+                }
+            elif len(str(overview_data or "")) >= INDUSTRY_LLM_MIN_TEXT_LEN and time_remaining() > (LLM_TIMEOUT_SECONDS / 2):
+                llm_calls_total += 1
+                llm_start = time.time()
+                industry_result = await _run_with_timeout(
+                    _classify_industry(llm, company_name, year, str(overview_data)),
+                    LLM_TIMEOUT_SECONDS,
+                    {"industry": "general_corporate", "confidence": 0.5, "evidence": []},
+                    "行业识别"
                 )
-            except Exception as e:
-                logger.warning(f"⚠️ 业务亮点-公司概况检索失败，使用空白: {e}")
-                overview_data = ""
-            industry_result = await _run_with_timeout(
-                _classify_industry(llm, company_name, year, str(overview_data)),
-                LLM_TIMEOUT_SECONDS,
-                {"industry": "general_corporate", "confidence": 0.5, "evidence": []},
-                "行业识别"
-            )
-        logger.info(f"✅ 业务亮点行业识别: {industry_result.get('industry')}，置信度: {industry_result.get('confidence')}")
-        
-        # Step 2: 业务拆分模板选择
-        schema = get_business_schema(industry_result.get("industry", "general_corporate"))
-        
-        # Step 3: 业务板块数据抽取（指标映射）
-        business_query = (
-            f"{company_name} {year}年 分部信息 业务板块 业务结构 业务收入 主要产品 服务"
+                llm_time += time.time() - llm_start
+            else:
+                industry_result = {
+                    "industry": "general_corporate",
+                    "confidence": 0.45,
+                    "evidence": ["llm_fallback_skipped_for_speed"]
+                }
+
+        industry = industry_result.get("industry", "general_corporate")
+        schema = get_business_schema(industry)
+
+        # Step 3: 合并LLM调用（板块选择 + 指标映射）
+        segment_rules = _build_segment_rules(schema, industry)
+        llm_calls_total += 1
+        llm_start = time.time()
+        mapping_result = await _run_with_timeout(
+            _select_segments_and_map_metrics(
+                llm=llm,
+                industry=industry,
+                schema=schema,
+                business_data=str(business_data),
+                overview_data=str(overview_data),
+                segment_rules=segment_rules
+            ),
+            LLM_TIMEOUT_SECONDS,
+            {
+                "industry": industry,
+                "selected_segments": [],
+                "reasoning": [],
+                "evidence": [],
+                "segments": [],
+                "notes": "板块识别与指标映射超时",
+            },
+            "板块识别与指标映射"
         )
-        if time_remaining() <= 0:
-            raise TimeoutError("业务亮点生成超时，提前结束")
-        try:
-            business_data = await _run_query_with_timeout(
+        llm_time += time.time() - llm_start
+
+        segment_selection = {
+            "industry": industry,
+            "selected_segments": mapping_result.get("selected_segments", []),
+            "reasoning": mapping_result.get("reasoning", []),
+            "evidence": mapping_result.get("evidence", []),
+        }
+        selected_schema = _filter_schema_by_segments(schema, segment_selection.get("selected_segments", []))
+        metrics_mapping = {
+            "segments": mapping_result.get("segments", []),
+            "notes": mapping_result.get("notes", ""),
+        }
+
+        if ENABLE_RULE_ENRICH:
+            metrics_mapping = await _enrich_metrics_with_rules(
+                metrics_mapping,
+                industry,
+                company_name,
+                year,
                 query_engine,
-                business_query,
-                QUERY_TIMEOUT_SECONDS
+                time_remaining
             )
-        except Exception as e:
-            logger.warning(f"⚠️ 业务亮点-业务结构检索失败，使用空白: {e}")
-            business_data = ""
-        # 不做二次检索，避免额外耗时
+        else:
+            logger.info("⏭️ [business_highlights] 已关闭规则补检索(BH_ENABLE_RULE_ENRICH=0)")
 
-        segment_selection = await _run_with_timeout(
-            _select_segments(
-            llm,
-            industry_result.get("industry", "general_corporate"),
-            schema,
-            str(business_data)
-            ),
-            LLM_TIMEOUT_SECONDS,
-            {"industry": industry_result.get("industry", "general_corporate"), "selected_segments": [], "reasoning": [], "evidence": []},
-            "业务板块选择"
-        )
-        if not segment_selection.get("selected_segments"):
-            logger.warning("⚠️ 业务板块选择为空，回退到行业模板全量板块")
-
-        selected_schema = _filter_schema_by_segments(
-            schema,
-            segment_selection.get("selected_segments", [])
-        )
-
-        metrics_mapping = await _run_with_timeout(
-            _map_metrics_to_schema(
-                llm,
-                selected_schema,
-                str(business_data),
-                str(overview_data),
-                industry_result.get("industry", "general_corporate")
-            ),
-            LLM_TIMEOUT_SECONDS,
-            {"segments": [], "notes": "指标映射超时"},
-            "指标映射"
-        )
-        metrics_mapping = await _enrich_metrics_with_rules(
-            metrics_mapping,
-            industry_result.get("industry", "general_corporate"),
-            company_name,
-            year,
-            query_engine,
-            time_remaining
-        )
         if not metrics_mapping.get("segments"):
-            # 没有抽取到指标时，至少保留业务板块，便于生成占位表格
             fallback_segments = []
             for segment in selected_schema.get("segments", []):
                 segment_id = segment.get("segment_id")
@@ -861,226 +1222,78 @@ async def generate_business_highlights(
                 })
             metrics_mapping["segments"] = fallback_segments
             metrics_mapping.setdefault("notes", "指标抽取为空，已使用模板板块生成占位表格")
+
         extracted_metrics = _build_extracted_metrics(metrics_mapping)
-        
-        # Step 4: 业务-财务-战略联动分析
-        strategy_query = f"{company_name} {year}年 发展战略 经营计划 战略规划 竞争优势"
-        if time_remaining() <= 0:
-            raise TimeoutError("业务亮点生成超时，提前结束")
-        try:
-            strategy_data = await _run_query_with_timeout(
-                query_engine,
-                strategy_query,
-                QUERY_TIMEOUT_SECONDS
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ 业务亮点-战略检索失败，使用空白: {e}")
-            strategy_data = ""
-        prompt = _build_highlights_prompt(
-            company_name,
-            year,
-            selected_schema,
-            metrics_mapping,
-            str(strategy_data)
+
+        # Step 4: 合并LLM调用（业务亮点 + 联动报告）
+        llm_calls_total += 1
+        llm_start = time.time()
+        unified_prompt = _build_unified_highlights_and_performance_prompt(
+            company_name=company_name,
+            year=year,
+            industry=industry,
+            selected_schema=selected_schema,
+            metrics_mapping=metrics_mapping,
+            extracted_metrics=extracted_metrics,
+            strategy_data=str(strategy_data),
         )
+        unified_response = await _run_with_timeout(
+            llm.achat([
+                ChatMessage(role="system", content="你是业务分析师，必须严格输出JSON。"),
+                ChatMessage(role="user", content=unified_prompt)
+            ]),
+            LLM_TIMEOUT_SECONDS,
+            "",
+            "业务亮点与联动报告"
+        )
+        llm_time += time.time() - llm_start
 
-        # 使用结构化输出 - 添加异常处理和性能监控
-        response = None
-        structured_llm_start = time.time()
-        try:
-            sllm = llm.as_structured_llm(BusinessHighlights)
-            raw_response = await _run_with_timeout(
-                sllm.achat([
-                    ChatMessage(role="system", content="你是一个专业的业务分析师,擅长总结业务亮点。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
-                    ChatMessage(role="user", content=prompt)
-                ]),
-                LLM_TIMEOUT_SECONDS,
-                {},
-                "业务亮点生成"
-            )
-            
-            # 检查响应类型 - 处理字符串响应
-            if isinstance(raw_response, str):
-                logger.warning(f"⚠️ [generate_business_highlights] 结构化LLM返回字符串，尝试解析JSON")
-                import json
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', raw_response)
-                if json_match:
-                    parsed_data = json.loads(json_match.group(0))
-                    if 'business_highlights' in parsed_data:
-                        parsed_data = parsed_data['business_highlights']
-                    response = BusinessHighlights(**parsed_data) if isinstance(parsed_data, dict) and 'highlights' in parsed_data else parsed_data
-                else:
-                    raise ValueError("无法从字符串响应提取JSON")
-            elif isinstance(raw_response, BusinessHighlights):
-                response = raw_response
-            elif hasattr(raw_response, 'message') and hasattr(raw_response.message, 'content'):
-                # 处理Response对象，message.content可能是字符串
-                content = raw_response.message.content
-                if isinstance(content, str):
-                    logger.warning(f"⚠️ [generate_business_highlights] 响应message.content是字符串，尝试解析JSON")
-                    import json
-                    import re
-                    json_match = re.search(r'\{[\s\S]*\}', content)
-                    if json_match:
-                        parsed_data = json.loads(json_match.group(0))
-                        if 'business_highlights' in parsed_data:
-                            parsed_data = parsed_data['business_highlights']
-                        response = BusinessHighlights(**parsed_data) if isinstance(parsed_data, dict) and 'highlights' in parsed_data else parsed_data
-                    else:
-                        raise ValueError("无法从message.content提取JSON")
-                else:
-                    response = content
-            else:
-                response = raw_response
-            
-            structured_llm_time = time.time() - structured_llm_start
-            logger.info(f"✅ [generate_business_highlights] 结构化输出成功，耗时: {structured_llm_time:.2f}秒")
-        except (AttributeError, ValueError, TypeError) as structured_error:
-            error_type = type(structured_error).__name__
-            error_msg = str(structured_error)
-            structured_llm_time = time.time() - structured_llm_start
-            
-            # 更详细的错误信息
-            if "model_dump_json" in error_msg or "AttributeError" in error_type:
-                logger.warning(f"⚠️ [generate_business_highlights] 结构化LLM返回了字符串而非Pydantic模型（耗时: {structured_llm_time:.2f}秒）")
-                logger.warning(f"[generate_business_highlights] 错误类型: {error_type}, 错误信息: {error_msg}")
-                logger.info(f"[generate_business_highlights] 这是LlamaIndex的已知问题，将尝试从字符串解析JSON")
-            else:
-                logger.warning(f"⚠️ [generate_business_highlights] 结构化输出失败（{error_type}，耗时: {structured_llm_time:.2f}秒）: {error_msg}")
-            
-            logger.info(f"[generate_business_highlights] 尝试使用普通LLM输出并手动解析JSON")
-            # 回退到普通LLM输出
-            try:
-                normal_response = await _run_with_timeout(
-                    llm.achat([
-                        ChatMessage(role="system", content="你是一个专业的业务分析师,擅长总结业务亮点。你必须严格按照用户要求的JSON格式输出，只输出JSON，不要有任何其他文字。"),
-                        ChatMessage(role="user", content=prompt)
-                    ]),
-                    LLM_TIMEOUT_SECONDS,
-                    "",
-                    "业务亮点回退生成"
-                )
-                
-                # 提取并解析JSON
-                if hasattr(normal_response, 'message'):
-                    content = normal_response.message.content if hasattr(normal_response.message, 'content') else str(normal_response.message)
-                else:
-                    content = str(normal_response)
-                
-                import json
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    json_str = json_match.group(0)
-                    parsed_data = json.loads(json_str)
-                    
-                    # 处理嵌套结构
-                    if 'business_highlights' in parsed_data:
-                        parsed_data = parsed_data['business_highlights']
-                    elif len(parsed_data) == 1:
-                        parsed_data = list(parsed_data.values())[0]
-                    
-                    try:
-                        response = BusinessHighlights(**parsed_data)
-                        logger.info(f"✅ 手动解析JSON成功")
-                    except Exception as validation_error:
-                        logger.warning(f"⚠️ JSON验证失败，返回部分数据: {str(validation_error)}")
-                        response = parsed_data if isinstance(parsed_data, dict) else {"content": content}
-                else:
-                    raise ValueError("无法从响应中提取JSON")
-            except Exception as fallback_error:
-                logger.error(f"❌ 回退方案也失败: {str(fallback_error)}")
-                # 返回错误信息，但不中断流程
-                response = {
-                    "error": f"生成失败: {str(fallback_error)}",
-                    "content": content if 'content' in locals() else str(fallback_error)
-                }
+        unified_content = _extract_llm_content(unified_response)
+        unified_parsed = _extract_json_from_text(unified_content) or {}
 
-        logger.info(f"✅ 业务亮点生成成功")
+        raw_highlights = unified_parsed.get("business_highlights")
+        if not isinstance(raw_highlights, dict):
+            raw_highlights = unified_parsed if isinstance(unified_parsed, dict) else {}
 
-        # Step 5: 业务-财务-战略联动（对齐 BusinessPerformanceReport）
-        performance_report = {
+        result_dict = _validate_and_clean_data(raw_highlights, BusinessHighlights)
+        if not isinstance(result_dict, dict) or not result_dict:
+            result_dict = {
+                "highlights": [],
+                "overall_summary": "业务亮点生成失败，已降级",
+                "key_metrics_summary": {}
+            }
+
+        default_perf = {
             "company_name": company_name,
             "fiscal_year": year,
-            "industry": industry_result.get("industry", "general_corporate"),
+            "industry": industry,
             "overall_summary": "",
             "segment_insights": []
         }
-        if time_remaining() > 20:
-            performance_prompt = _build_performance_prompt(
-                company_name,
-                year,
-                industry_result.get("industry", "general_corporate"),
-                selected_schema,
-                extracted_metrics,
-                str(strategy_data)
-            )
-            performance_response = await _run_with_timeout(
-                llm.achat([
-                    ChatMessage(role="system", content="你是业务-财务-战略联动分析专家，必须严格输出JSON。"),
-                    ChatMessage(role="user", content=performance_prompt)
-                ]),
-                LLM_TIMEOUT_SECONDS,
-                "",
-                "业务-财务-战略联动"
-            )
-            performance_content = _extract_llm_content(performance_response)
-            performance_parsed = _extract_json_from_text(performance_content) or {}
-            try:
-                performance_report = BusinessPerformanceReport.model_validate(performance_parsed).model_dump()
-            except Exception:
-                performance_report = performance_parsed or performance_report
+        performance_parsed = unified_parsed.get("business_performance_report")
+        if not isinstance(performance_parsed, dict):
+            performance_parsed = default_perf
+        try:
+            performance_report = BusinessPerformanceReport.model_validate(performance_parsed).model_dump()
+        except Exception:
+            performance_report = performance_parsed or default_perf
 
         segment_tables = _build_segment_tables(
             metrics_mapping,
             year,
             performance_report if isinstance(performance_report, dict) else {},
-            industry_result.get("industry", "general_corporate")
+            industry
         )
         key_metrics_summary = _build_key_metrics_summary(segment_tables, year)
-        
-        # 处理响应 - 确保返回字典格式
-        result_dict = None
-        
-        # 如果response是字典且包含error，直接返回
-        if isinstance(response, dict) and 'error' in response:
-            result_dict = response
-        # 首先检查是否是Pydantic模型
-        elif isinstance(response, BusinessHighlights):
-            result_dict = response.model_dump()
-        elif hasattr(response, 'raw'):
-            raw_data = response.raw
-            if hasattr(raw_data, 'model_dump'):
-                try:
-                    result_dict = raw_data.model_dump()
-                except Exception as e:
-                    logger.warning(f"model_dump() 失败: {e}")
-            elif isinstance(raw_data, dict):
-                result_dict = raw_data
-            elif isinstance(raw_data, str):
-                import json
-                try:
-                    result_dict = json.loads(raw_data)
-                except json.JSONDecodeError:
-                    result_dict = {"content": raw_data}
-            else:
-                result_dict = {"content": str(raw_data)}
-        
-        if result_dict is None:
-            if hasattr(response, 'model_dump'):
-                try:
-                    result_dict = response.model_dump()
-                except Exception:
-                    pass
-            elif isinstance(response, dict):
-                result_dict = response
-            else:
-                result_dict = {"content": str(response)}
-        
-        if not isinstance(result_dict, dict):
-            result_dict = {"content": str(result_dict)}
-        
+        if not result_dict.get("key_metrics_summary"):
+            result_dict["key_metrics_summary"] = key_metrics_summary
+
+        visualization_payload = _build_visualization_payload(
+            segment_tables,
+            key_metrics_summary,
+            performance_report if isinstance(performance_report, dict) else {}
+        )
+
         extra_payload = {
             "company_name": company_name,
             "year": year,
@@ -1093,15 +1306,31 @@ async def generate_business_highlights(
             "business_performance_report": performance_report,
             "metrics_mapping_notes": metrics_mapping.get("notes"),
             "segment_tables": segment_tables,
-            "key_metrics_summary": key_metrics_summary
+            "key_metrics_summary": key_metrics_summary,
+            "visualization_spec": visualization_payload.get("visualization_spec"),
+            "visualization_insights": visualization_payload.get("visualization_insights")
+        }
+        result_dict.update(extra_payload)
+
+        total_time = time.time() - start_time
+        result_dict["perf_stats"] = {
+            "retrieval_time_seconds": round(retrieval_time, 2),
+            "llm_time_seconds": round(llm_time, 2),
+            "total_time_seconds": round(total_time, 2),
+            "retrieval_count": retrieval_count,
+            "retrieval_success_count": retrieval_success_count,
+            "llm_calls_total": llm_calls_total,
+            "enable_rule_enrich": ENABLE_RULE_ENRICH,
+            "rule_enrich_max_queries": RULE_ENRICH_MAX_QUERIES,
+            "timeouts": {
+                "query_timeout_seconds": QUERY_TIMEOUT_SECONDS,
+                "llm_timeout_seconds": LLM_TIMEOUT_SECONDS,
+                "max_total_seconds": MAX_TOTAL_SECONDS,
+            }
         }
 
-        # 数据验证和清理（仅针对业务亮点结构）
-        result_dict = _validate_and_clean_data(result_dict, BusinessHighlights)
-        result_dict.update(extra_payload)
-        
         return result_dict
-        
+
     except Exception as e:
         logger.error(f"❌ 生成业务亮点失败: {str(e)}")
         import traceback
@@ -1113,4 +1342,3 @@ async def generate_business_highlights(
             "segment_tables": [],
             "key_metrics_summary": _build_key_metrics_summary([], year)
         }
-

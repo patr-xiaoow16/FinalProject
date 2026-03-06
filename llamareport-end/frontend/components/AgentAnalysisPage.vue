@@ -367,18 +367,80 @@ export default {
     isBusinessGuidanceObject(data) {
       return data && typeof data === 'object' && !Array.isArray(data)
     },
+    /** 将业绩指引列表项（字符串或对象）转为可读字符串数组，与 main.js normalizeGuidanceList 一致 */
+    normalizeGuidanceList(items, kind) {
+      if (items == null) return []
+      if (!Array.isArray(items)) {
+        if (typeof items === 'string') return items.trim() ? [items.trim()] : []
+        return []
+      }
+      const out = []
+      for (const item of items) {
+        if (typeof item === 'string') {
+          const t = item.trim()
+          if (t) out.push(t)
+          continue
+        }
+        if (item == null || typeof item !== 'object') continue
+        if (kind === 'key_metrics') {
+          const name = item['指标名'] ?? item.metric ?? item.name ?? '指标'
+          const val = item['数值'] ?? item.value ?? '—'
+          const chg = item['变化'] ?? item.change
+          const interp = item['解读'] ?? item.interpretation
+          const parts = [`${name}：${val}`]
+          if (chg != null && String(chg).trim()) parts.push(`变化${chg}`)
+          if (interp != null && String(interp).trim()) parts.push(String(interp))
+          out.push(parts.join('，'))
+        } else if (kind === 'business_specific_guidance') {
+          const action = item['执行动作'] ?? item.action ?? '执行动作'
+          const evidence = item['证据'] ?? item.evidence
+          const impact = item['影响'] ?? item.impact
+          const parts = [String(action)]
+          if (evidence != null && String(evidence).trim()) parts.push(`证据：${evidence}`)
+          if (impact != null && String(impact).trim()) parts.push(`影响：${impact}`)
+          out.push(parts.join('；'))
+        } else if (kind === 'risk_warnings') {
+          const risk = item['风险名称'] ?? item.risk ?? '风险'
+          const impactObj = item['影响对象'] ?? item.impact
+          const metric = item['指标变化'] ?? item.metric_change
+          const prob = item['概率'] ?? item.probability
+          const parts = [String(risk)]
+          if (impactObj != null && String(impactObj).trim()) parts.push(`影响对象：${impactObj}`)
+          if (metric != null && String(metric).trim()) parts.push(`指标变化：${metric}`)
+          if (prob != null && String(prob).trim()) parts.push(`概率：${prob}`)
+          out.push(parts.join('；'))
+        } else {
+          const s = String(item).trim()
+          if (s) out.push(s)
+        }
+      }
+      return out
+    },
     buildBusinessGuidanceSections(data) {
-      if (!this.isBusinessGuidanceObject(data)) return []
-      const guidancePeriod = data.guidance_period || data.guidancePeriod
-      const expectedPerformance = data.expected_performance || data.expectedPerformance
-      const keyMetrics = data.key_metrics || data.keyMetrics || []
-      const parentProfit = data.parent_net_profit_range || data.parentNetProfitRange
-      const parentProfitGrowth = data.parent_net_profit_growth_range || data.parentNetProfitGrowthRange
-      const nonRecurringProfit = data.non_recurring_profit_range || data.nonRecurringProfitRange
-      const epsRange = data.eps_range || data.epsRange
-      const revenueRange = data.revenue_range || data.revenueRange
-      const businessGuidance = data.business_specific_guidance || data.businessSpecificGuidance || []
-      const riskWarnings = data.risk_warnings || data.riskWarnings || []
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return []
+      // 支持完整报告结构：{ business_guidance, ... }
+      const payload = data.business_guidance != null ? data.business_guidance : data
+      if (!this.isBusinessGuidanceObject(payload)) return []
+
+      const guidancePeriod = payload.guidance_period || payload.guidancePeriod
+      const expectedPerformance = payload.expected_performance || payload.expectedPerformance
+      const keyMetricsNormalized = this.normalizeGuidanceList(
+        payload.key_metrics || payload.keyMetrics,
+        'key_metrics'
+      )
+      const parentProfit = payload.parent_net_profit_range || payload.parentNetProfitRange
+      const parentProfitGrowth = payload.parent_net_profit_growth_range || payload.parentNetProfitGrowthRange
+      const nonRecurringProfit = payload.non_recurring_profit_range || payload.nonRecurringProfitRange
+      const epsRange = payload.eps_range || payload.epsRange
+      const revenueRange = payload.revenue_range || payload.revenueRange
+      const businessGuidanceNormalized = this.normalizeGuidanceList(
+        payload.business_specific_guidance || payload.businessSpecificGuidance,
+        'business_specific_guidance'
+      )
+      const riskWarningsNormalized = this.normalizeGuidanceList(
+        payload.risk_warnings || payload.riskWarnings,
+        'risk_warnings'
+      )
 
       const whatParts = []
       if (guidancePeriod) whatParts.push(`期间：${guidancePeriod}`)
@@ -391,11 +453,11 @@ export default {
       if (nonRecurringProfit) metricParts.push(`扣非净利润：${nonRecurringProfit}`)
       if (epsRange) metricParts.push(`基本每股收益：${epsRange}`)
       if (revenueRange) metricParts.push(`营业收入：${revenueRange}`)
-      const watchList = metricParts.length ? metricParts : (Array.isArray(keyMetrics) ? keyMetrics : [])
+      const watchList = metricParts.length ? metricParts : keyMetricsNormalized
       const watchContent = watchList.length ? watchList : '年报未明确量化口径'
 
-      const howContent = businessGuidance.length ? businessGuidance : '未明确'
-      const riskContent = riskWarnings.length ? riskWarnings : '未明确'
+      const howContent = businessGuidanceNormalized.length ? businessGuidanceNormalized : '未明确'
+      const riskContent = riskWarningsNormalized.length ? riskWarningsNormalized : '未明确'
 
       return [
         { title: '① 经营目标方向', content: whatText },
@@ -728,8 +790,60 @@ export default {
         console.warn('⚠️ [AgentAnalysisPage] 业绩指引文本可视化请求异常:', error)
       }
     },
+    appendBusinessHighlightsSpecTables(toolOutput) {
+      if (!toolOutput || typeof toolOutput !== 'object') return false
+      const spec = toolOutput.visualization_spec || toolOutput.visualizationSpec || {}
+      const metricAnchor = spec.metric_anchor || spec.metricAnchor || {}
+      if (!metricAnchor || typeof metricAnchor !== 'object') return false
+
+      const appendTableCard = (vizId, question, table, summary = '') => {
+        if (!table || typeof table !== 'object') return
+        const exists = this.visualizations.some(viz => viz.id === vizId)
+        if (exists) return
+        this.visualizations.push({
+          id: vizId,
+          question,
+          source: 'business_highlights',
+          data: {
+            has_visualization: true,
+            type: 'financial_table',
+            table,
+            summary
+          }
+        })
+      }
+
+      const summaryTable = metricAnchor.key_metrics_summary_table || metricAnchor.keyMetricsSummaryTable
+      if (summaryTable && typeof summaryTable === 'object') {
+        appendTableCard(
+          'biz-table-summary-v2',
+          summaryTable.title || metricAnchor.summary_title || metricAnchor.summaryTitle || '关键业务指标汇总',
+          summaryTable,
+          '关键业务指标汇总'
+        )
+      }
+
+      const segmentTables = Array.isArray(metricAnchor.segment_tables)
+        ? metricAnchor.segment_tables
+        : (Array.isArray(metricAnchor.segmentTables) ? metricAnchor.segmentTables : [])
+      segmentTables.forEach((segment, idx) => {
+        const segmentId = segment.segment_id || segment.segmentId || `segment-${idx}`
+        const segmentName = segment.segment_name || segment.segmentName || segmentId
+        const table = segment.table
+        appendTableCard(
+          `biz-table-v2-${segmentId}`,
+          `${segmentName}指标`,
+          table,
+          segment.conclusion || ''
+        )
+      })
+
+      return !!(summaryTable || segmentTables.length)
+    },
     appendBusinessHighlightsTables(toolOutput) {
       if (!toolOutput || typeof toolOutput !== 'object') return
+      const hasSpecTables = this.appendBusinessHighlightsSpecTables(toolOutput)
+      if (hasSpecTables) return
       const segmentTables = Array.isArray(toolOutput.segment_tables) ? toolOutput.segment_tables : []
       const performanceReport = toolOutput.business_performance_report || toolOutput.businessPerformanceReport || {}
       const segmentInsights = Array.isArray(performanceReport.segment_insights)
@@ -788,6 +902,31 @@ export default {
     },
     appendBusinessHighlightsInsights(toolOutput) {
       if (!toolOutput || typeof toolOutput !== 'object') return
+      const spec = toolOutput.visualization_spec || toolOutput.visualizationSpec || {}
+      const growthEngine = spec.growth_engine || spec.growthEngine || {}
+      const growthItems = Array.isArray(growthEngine.items) ? growthEngine.items : []
+      if (growthItems.length > 0) {
+        growthItems.forEach((item, idx) => {
+          if (!item) return
+          const segmentId = item.segment_id || item.segmentId || `segment-${idx}`
+          const vizId = `biz-insight-v2-${segmentId}`
+          const exists = this.visualizations.some(viz => viz.id === vizId)
+          if (exists) return
+          this.visualizations.push({
+            id: vizId,
+            question: `${item.segment_name || item.segmentName || segmentId}洞察`,
+            source: 'business_highlights',
+            data: {
+              has_visualization: true,
+              type: 'insight_card',
+              title: item.segment_name || item.segmentName || segmentId,
+              headline: item.headline || '',
+              contribution: item.contribution || ''
+            }
+          })
+        })
+        return
+      }
       const performanceReport = toolOutput.business_performance_report || toolOutput.businessPerformanceReport || {}
       const segmentInsights = Array.isArray(performanceReport.segment_insights)
         ? performanceReport.segment_insights
@@ -1108,28 +1247,71 @@ export default {
     },
     formatBusinessGuidanceReport(payload) {
       if (!payload || typeof payload !== 'object') return ''
-      
-      const guidancePeriod = payload.guidance_period || payload.guidancePeriod || ''
-      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
-      const keyMetrics = Array.isArray(payload.key_metrics || payload.keyMetrics)
-        ? (payload.key_metrics || payload.keyMetrics)
+      // 支持后端返回的完整报告结构：{ business_guidance, extracted_data, ... }
+      let resolved = payload.business_guidance != null ? payload.business_guidance : payload
+      // 若顶层无列表数据，尝试从 raw_output 取完整 payload（LlamaIndex 等包装格式）
+      const hasListData = (p) => {
+        if (!p || typeof p !== 'object') return false
+        const km = p.key_metrics || p.keyMetrics
+        const bg = p.business_specific_guidance || p.businessSpecificGuidance
+        const rw = p.risk_warnings || p.riskWarnings
+        return (Array.isArray(km) && km.length > 0) ||
+          (Array.isArray(bg) && bg.length > 0) ||
+          (Array.isArray(rw) && rw.length > 0)
+      }
+      if (!hasListData(resolved) && payload.raw_output != null) {
+        let raw = payload.raw_output
+        if (typeof raw === 'string') {
+          try {
+            raw = JSON.parse(raw)
+          } catch (e) {
+            const m = raw.match(/\{[\s\S]*\}/)
+            if (m) try { raw = JSON.parse(m[0]) } catch (e2) { raw = null }
+          }
+        }
+        if (raw && typeof raw === 'object' && hasListData(raw)) {
+          resolved = raw
+        }
+      }
+      const payload_ = resolved
+
+      const guidancePeriod = payload_.guidance_period || payload_.guidancePeriod || ''
+      const expectedPerformance = payload_.expected_performance || payload_.expectedPerformance || ''
+      const keyMetrics = Array.isArray(payload_.key_metrics || payload_.keyMetrics)
+        ? (payload_.key_metrics || payload_.keyMetrics)
         : []
-      const businessGuidance = Array.isArray(payload.business_specific_guidance || payload.businessSpecificGuidance)
-        ? (payload.business_specific_guidance || payload.businessSpecificGuidance)
+      const businessGuidance = Array.isArray(payload_.business_specific_guidance || payload_.businessSpecificGuidance)
+        ? (payload_.business_specific_guidance || payload_.businessSpecificGuidance)
         : []
-      const riskWarnings = Array.isArray(payload.risk_warnings || payload.riskWarnings)
-        ? (payload.risk_warnings || payload.riskWarnings)
+      const riskWarnings = Array.isArray(payload_.risk_warnings || payload_.riskWarnings)
+        ? (payload_.risk_warnings || payload_.riskWarnings)
         : []
-      
+
+      // 将对象项转为可读字符串（兼容 指标名/数值/变化/解读、执行动作/证据/影响、风险名称/影响对象 等结构）
+      const itemToText = (item) => {
+        if (item == null) return ''
+        if (typeof item === 'string') return item
+        if (typeof item !== 'object') return String(item)
+        const name = item['指标名'] ?? item.metric_name ?? item.name ?? item.执行动作 ?? item.action ?? item.风险名称 ?? item.risk_name ?? item.risk ?? ''
+        const value = item['数值'] ?? item.value ?? item.证据 ?? item.evidence ?? item.影响 ?? item.impact ?? ''
+        const change = item['变化'] ?? item.change ?? ''
+        const desc = item['解读'] ?? item.description ?? item.影响 ?? item.impact ?? ''
+        const parts = [name]
+        if (value !== '' && value != null) parts.push(String(value))
+        if (change !== '' && change != null) parts.push(`（${change}）`)
+        if (desc !== '' && desc != null && desc !== value) parts.push(desc)
+        return parts.filter(Boolean).join(' ')
+      }
+
       // 提取额外的指标数据
-      const parentProfit = payload.parent_net_profit_range || payload.parentNetProfitRange
-      const parentProfitGrowth = payload.parent_net_profit_growth_range || payload.parentNetProfitGrowthRange
-      const nonRecurringProfit = payload.non_recurring_profit_range || payload.nonRecurringProfitRange
-      const epsRange = payload.eps_range || payload.epsRange
-      const revenueRange = payload.revenue_range || payload.revenueRange
-      
+      const parentProfit = payload_.parent_net_profit_range || payload_.parentNetProfitRange
+      const parentProfitGrowth = payload_.parent_net_profit_growth_range || payload_.parentNetProfitGrowthRange
+      const nonRecurringProfit = payload_.non_recurring_profit_range || payload_.nonRecurringProfitRange
+      const epsRange = payload_.eps_range || payload_.epsRange
+      const revenueRange = payload_.revenue_range || payload_.revenueRange
+
       const sections = []
-      
+
       // 一、经营目标方向
       if (guidancePeriod || expectedPerformance) {
         const lines = ['### 一、经营目标方向']
@@ -1141,7 +1323,7 @@ export default {
         }
         sections.push(lines.join('\n'))
       }
-      
+
       // 二、核心指标锚点
       const metricItems = []
       if (parentProfit) metricItems.push(`归母净利润：${parentProfit}`)
@@ -1149,8 +1331,8 @@ export default {
       if (nonRecurringProfit) metricItems.push(`扣非净利润：${nonRecurringProfit}`)
       if (epsRange) metricItems.push(`基本每股收益：${epsRange}`)
       if (revenueRange) metricItems.push(`营业收入：${revenueRange}`)
-      
-      const allMetrics = metricItems.length > 0 ? metricItems : keyMetrics
+
+      const allMetrics = metricItems.length > 0 ? metricItems : keyMetrics.map(itemToText).filter(Boolean)
       if (allMetrics.length > 0) {
         const lines = ['### 二、核心指标锚点']
         allMetrics.forEach(metric => {
@@ -1160,29 +1342,27 @@ export default {
         })
         sections.push(lines.join('\n'))
       }
-      
+
       // 三、关键执行路径
-      if (businessGuidance.length > 0) {
+      const guidanceLines = businessGuidance.map(itemToText).filter(Boolean)
+      if (guidanceLines.length > 0) {
         const lines = ['### 三、关键执行路径']
-        businessGuidance.forEach(guidance => {
-          if (guidance) {
-            lines.push(`- ${guidance}`)
-          }
+        guidanceLines.forEach(g => {
+          if (g) lines.push(`- ${g}`)
         })
         sections.push(lines.join('\n'))
       }
-      
+
       // 四、不确定性与边界
-      if (riskWarnings.length > 0) {
+      const riskLines = riskWarnings.map(itemToText).filter(Boolean)
+      if (riskLines.length > 0) {
         const lines = ['### 四、不确定性与边界']
-        riskWarnings.forEach(risk => {
-          if (risk) {
-            lines.push(`- ${risk}`)
-          }
+        riskLines.forEach(r => {
+          if (r) lines.push(`- ${r}`)
         })
         sections.push(lines.join('\n'))
       }
-      
+
       return sections.join('\n\n')
     },
     async handleSubmit() {
@@ -1286,10 +1466,25 @@ export default {
               // 从工具调用中提取实际输出（可能是 raw_output 字段）
               let toolOutput = toolCall.tool_output
               
-              // 如果 tool_output 是包含 raw_output 的对象，提取它
+              // 如果 tool_output 含 raw_output，优先解析为对象并与外层字段合并，避免前端直接展示原始JSON字符串
               if (toolOutput && typeof toolOutput === 'object' && toolOutput.raw_output !== undefined) {
-                toolOutput = toolOutput.raw_output
-                console.log(`  [${index + 1}] 从 tool_output.raw_output 提取内容`)
+                const rawOutput = toolOutput.raw_output
+                let parsedRaw = rawOutput
+                if (typeof rawOutput === 'string') {
+                  try {
+                    parsedRaw = JSON.parse(rawOutput)
+                  } catch (e) {
+                    parsedRaw = null
+                  }
+                }
+                if (parsedRaw && typeof parsedRaw === 'object' && !Array.isArray(parsedRaw)) {
+                  toolOutput = { ...parsedRaw, ...toolOutput }
+                  delete toolOutput.raw_output
+                  console.log(`  [${index + 1}] 从 tool_output.raw_output 解析并合并对象`)
+                } else if (typeof rawOutput === 'string' && toolName !== 'generate_business_guidance') {
+                  toolOutput = rawOutput
+                  console.log(`  [${index + 1}] 使用 tool_output.raw_output 字符串`)
+                }
               }
               
               console.log(`  [${index + 1}] 工具: ${toolName}`, {
@@ -1373,12 +1568,13 @@ export default {
                 this.structuredData.businessHighlights = formattedReport || summary || textContent || toolOutput
                 console.log('✅ [AgentAnalysisPage] 设置业务亮点数据')
               } else if (toolName === 'generate_business_guidance' && toolOutput) {
-                if (this.isBusinessGuidanceObject(toolOutput)) {
-                  const formattedReport = this.formatBusinessGuidanceReport(toolOutput)
-                  this.structuredData.businessGuidance = formattedReport || toolOutput
-                } else {
-                  const textContent = extractTextFromToolOutput(toolOutput)
-                  this.structuredData.businessGuidance = textContent || toolOutput
+                // 后端可能返回完整报告 { business_guidance, ... } 或包装 { raw_output, summary, ... }；formatBusinessGuidanceReport 内会优先用 raw_output
+                const formattedReport = this.formatBusinessGuidanceReport(toolOutput)
+                this.structuredData.businessGuidance = formattedReport || extractTextFromToolOutput(toolOutput) || ''
+                this.appendBusinessGuidanceVisualTables(toolOutput)
+                // 若主回答是简短 summary 且包含「未明确」，用完整报告替换主内容区，避免二、三、四显示未明确
+                if (formattedReport && formattedReport.length > 200 && this.answer && /未明确|年报未明确/.test(this.answer)) {
+                  this.answer = formattedReport
                 }
                 console.log('✅ [AgentAnalysisPage] 设置业绩指引数据')
               } else if (toolName === 'generate_visualization' && toolOutput && toolOutput.has_visualization) {
@@ -1582,8 +1778,9 @@ export default {
               this.structuredData.businessHighlights = formattedReport || summary || structured.business_highlights
             }
             if (structured.business_guidance) {
-              const formattedReport = this.formatBusinessGuidanceReport(structured.business_guidance)
-              this.structuredData.businessGuidance = formattedReport || structured.business_guidance
+              const formattedReport = this.formatBusinessGuidanceReport(structured)
+              this.structuredData.businessGuidance = formattedReport || ''
+              this.appendBusinessGuidanceVisualTables(structured)
             }
           }
 
@@ -2109,7 +2306,8 @@ export default {
       }
       
       if (this.structuredData.businessGuidance) {
-        reportContent += `## 业绩指引\n\n${JSON.stringify(this.structuredData.businessGuidance, null, 2)}\n\n`
+        const bg = this.structuredData.businessGuidance
+        reportContent += `## 业绩指引\n\n${typeof bg === 'string' ? bg : JSON.stringify(bg, null, 2)}\n\n`
       }
       
       if (this.structuredData.dupontAnalysis) {
@@ -2926,4 +3124,3 @@ export default {
   }
 }
 </style>
-

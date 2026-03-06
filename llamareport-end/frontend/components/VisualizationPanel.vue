@@ -338,51 +338,18 @@
                 <!-- 洞察部分（联动生成的卡片） -->
                 <div v-if="card.isLinkageGenerated" class="insight-section">
                   <!-- 主要洞察 -->
-                  <div v-if="card.insight" class="main-insight">
+                  <div v-if="getPrimaryInsightFromData(card)" class="main-insight">
                     <div class="insight-header">
                       <span class="insight-icon">💡</span>
                       <span class="insight-title">洞察</span>
-                      <span v-if="card.insight.confidence" class="confidence-badge" :class="`confidence-${card.insight.confidence}`">
-                        {{ getConfidenceLabel(card.insight.confidence) }}
+                      <span v-if="getPrimaryInsightFromData(card).confidence" class="confidence-badge" :class="`confidence-${getPrimaryInsightFromData(card).confidence}`">
+                        {{ getConfidenceLabel(getPrimaryInsightFromData(card).confidence) }}
                       </span>
                     </div>
                     <div class="insight-content">
                       <!-- 只显示结论（不显示关键发现） -->
-                      <div v-if="card.insight.conclusion" class="insight-conclusion">
-                        <span v-html="formatInsightText(card.insight.conclusion)"></span>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <!-- 图表说明 -->
-                  <div v-if="card.data.recommendation" class="recommendation-box">
-                    <div class="recommendation-header">
-                      <span class="recommendation-icon">📈</span>
-                      <span class="recommendation-title">图表说明</span>
-                    </div>
-                    <div class="recommendation-content">
-                      <p><strong>图表类型：</strong>{{ getChartTypeName(getActualChartType(card.data)) }}</p>
-                      <p v-if="card.data.recommendation.reason"><strong>推荐理由：</strong>{{ card.data.recommendation.reason }}</p>
-                    </div>
-                  </div>
-                  
-                  <!-- 数据洞察 -->
-                  <div v-if="card.data.insights && card.data.insights.length > 0" class="data-insights">
-                    <div class="data-insights-header">
-                      <span class="data-insights-icon">📊</span>
-                      <span class="data-insights-title">数据洞察</span>
-                    </div>
-                    <div class="data-insights-content">
-                      <div 
-                        v-for="(insight, index) in card.data.insights" 
-                        :key="index" 
-                        class="data-insight-item"
-                      >
-                        <span class="insight-type-icon">{{ getInsightIcon(insight.insight_type) }}</span>
-                        <div class="insight-text" v-html="formatInsightText(insight.description)"></div>
-                        <ul v-if="insight.key_findings && insight.key_findings.length > 0" class="insight-findings-list">
-                          <li v-for="(finding, idx) in insight.key_findings" :key="idx" v-html="formatInsightText(finding)"></li>
-                        </ul>
+                      <div v-if="getPrimaryInsightFromData(card).conclusion" class="insight-conclusion">
+                        <span v-html="formatInsightText(getPrimaryInsightFromData(card).conclusion)"></span>
                       </div>
                     </div>
                   </div>
@@ -410,33 +377,23 @@
                   <div v-if="card.data.analysis_text" class="analysis-text-box">
                     <div v-html="formatAnalysisText(card.data.analysis_text)"></div>
                   </div>
-                  
-                  <!-- 推荐说明 -->
-                  <div v-if="card.data.recommendation && card.type !== 'financial_table'" class="recommendation-box">
-                    <h4>📈 图表推荐</h4>
-                    <p><strong>推荐图表类型:</strong> 
-                      <span>{{ getChartTypeName(getActualChartType(card.data)) }}</span>
-                    </p>
-                    <p><strong>推荐理由:</strong> {{ card.data.recommendation.reason }}</p>
-                  </div>
-                  
-                  <!-- 数据洞察 -->
-                  <div v-if="card.data.insights && card.data.insights.length > 0 && card.type !== 'financial_table'" class="insights-box">
-                    <h3>💡 数据洞察</h3>
-                    <div 
-                      v-for="(insight, index) in card.data.insights" 
-                      :key="index" 
-                      class="insight-item"
-                    >
-                      <h4>
-                        <span class="insight-icon">{{ getInsightIcon(insight.insight_type) }}</span>
-                        <span v-html="formatInsightText(insight.description)"></span>
-                      </h4>
-                      <ul v-if="insight.key_findings && insight.key_findings.length > 0">
-                        <li v-for="(finding, idx) in insight.key_findings" :key="idx" v-html="formatInsightText(finding)"></li>
-                      </ul>
+
+                  <!-- 主要洞察（统一为与 card.insight 相同样式，仅使用 card.data.insights 内容） -->
+                  <div v-if="getPrimaryInsightFromData(card)" class="main-insight">
+                    <div class="insight-header">
+                      <span class="insight-icon">💡</span>
+                      <span class="insight-title">洞察</span>
+                      <span v-if="getPrimaryInsightFromData(card).confidence" class="confidence-badge" :class="`confidence-${getPrimaryInsightFromData(card).confidence}`">
+                        {{ getConfidenceLabel(getPrimaryInsightFromData(card).confidence) }}
+                      </span>
+                    </div>
+                    <div class="insight-content">
+                      <div v-if="getPrimaryInsightFromData(card).conclusion" class="insight-conclusion">
+                        <span v-html="formatInsightText(getPrimaryInsightFromData(card).conclusion)"></span>
+                      </div>
                     </div>
                   </div>
+                  
                 </div>
               </div>
               <div v-else-if="card.data && card.data.error" class="error-message">
@@ -455,12 +412,6 @@
             </div>
             <div class="viz-card-content">
               <div id="visualizationChart" class="chart-container-inline"></div>
-              
-              <div v-if="hasRecommendation" class="recommendation-box">
-                <h4>📈 图表推荐</h4>
-                <p><strong>推荐图表类型:</strong> {{ getChartTypeName(chartData.recommendation.recommended_chart_type) }}</p>
-                <p><strong>推荐理由:</strong> {{ chartData.recommendation.reason }}</p>
-              </div>
               
               <div v-if="hasInsights" class="insights-box">
                 <h3>💡 数据洞察</h3>
@@ -709,9 +660,6 @@ export default {
     },
     hasInsights() {
       return this.chartData?.insights && this.chartData.insights.length > 0;
-    },
-    hasRecommendation() {
-      return this.chartData?.recommendation != null;
     },
     confidenceScore() {
       return this.chartData?.confidence_score || 0;
@@ -1744,6 +1692,39 @@ export default {
     getCardTitle(cardId) {
       const card = this.visualizationCards.find(c => c.id === cardId)
       return card ? (card.question || '未知视图') : '未知视图'
+    },
+    normalizeConfidence(confidence) {
+      if (!confidence) return null
+      const value = String(confidence).toLowerCase()
+      if (['high', 'medium', 'low'].includes(value)) return value
+      return null
+    },
+    getPrimaryInsightFromData(card) {
+      const insights = Array.isArray(card?.data?.insights) ? card.data.insights : []
+      if (!insights.length) return null
+
+      const parts = insights
+        .map((item, idx) => {
+          const description = String(item?.description || '').trim()
+          const findings = Array.isArray(item?.key_findings)
+            ? item.key_findings.map(v => String(v || '').trim()).filter(Boolean)
+            : []
+          const content = [description, ...findings].filter(Boolean).join('；')
+          if (!content) return ''
+          return insights.length > 1 ? `${idx + 1}）${content}` : content
+        })
+        .filter(Boolean)
+
+      if (!parts.length) return null
+
+      const insightConfidence = insights
+        .map(item => this.normalizeConfidence(item?.confidence || item?.confidence_level))
+        .find(Boolean)
+
+      return {
+        conclusion: parts.join('\n'),
+        confidence: insightConfidence
+      }
     }
   },
   mounted() {

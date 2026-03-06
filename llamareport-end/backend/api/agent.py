@@ -365,122 +365,28 @@ async def agent_query(request: AgentQueryRequest):
 async def visualize_text(request: VisualizationFromTextRequest):
     """
     基于文本内容生成可视化（不触发RAG检索）
+    说明：为避免重复触发与多段串行开销，统一改为单次调用并限制全请求最多3图。
     """
     try:
         if not request.answer or not request.answer.strip():
             raise HTTPException(status_code=400, detail="文本内容为空，无法生成可视化")
-        def clean_title(raw_title: Optional[str]) -> Optional[str]:
-            if not raw_title:
-                return None
-            title = re.sub(r'^[#\s]+', '', raw_title)
-            title = re.sub(r'^[一二三四五六七八九十]+[、.]\s*', '', title)
-            title = re.sub(r'^\d+\.\s*', '', title)
-            title = title.replace('【', '').replace('】', '').strip()
-            title = re.sub(r'[`*_]+', '', title)
-            title = title.strip('|').strip()
-            return title or None
 
-        def build_query_hint(title: Optional[str], content: str) -> str:
-            text = f"{title or ''} {content}"
-            hint_parts = []
-            if re.search(r'风险|不确定|压力|隐患', text):
-                hint_parts.append("风险与不确定性")
-            if re.search(r'结构|组成|分布|占比|业务结构', text):
-                hint_parts.append("结构描述")
-            if re.search(r'过程|阶段|推进|演进|时间|里程碑|事件', text):
-                hint_parts.append("过程与变化 时间轴")
-            if re.search(r'总结|结论|判断|整体|主线', text):
-                hint_parts.append("核心结论")
-            if re.search(r'展望|态度|信心|谨慎|乐观', text):
-                hint_parts.append("态度与语气")
-            if re.search(r'同比|较去年|趋势|变化|增长|下降', text):
-                hint_parts.append("数据类 趋势 对比")
-            return " ".join(hint_parts[:2])
+        max_views = max(1, min(request.max_views, 3))
+        viz_result = await generate_visualization_for_query(
+            query=request.query,
+            answer=request.answer,
+            data=request.data,
+            sources=request.sources,
+            max_visualizations=max_views
+        )
 
-        def split_sections(text: str) -> list:
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            if not lines:
-                return []
-            sections = []
-            current_title = None
-            current_lines = []
-            title_pattern = re.compile(r'^(#{1,6}\s+|[一二三四五六七八九十]+[、.]\s*|【.+】)')
-            for line in lines:
-                if title_pattern.match(line):
-                    if current_lines:
-                        sections.append((current_title, "\n".join(current_lines)))
-                    current_title = line
-                    current_lines = []
-                else:
-                    current_lines.append(line)
-            if current_lines:
-                sections.append((current_title, "\n".join(current_lines)))
-            return sections
+        if isinstance(viz_result, dict) and viz_result.get("has_visualization"):
+            visualizations = viz_result.get("visualizations")
+            if isinstance(visualizations, list) and len(visualizations) > max_views:
+                viz_result["visualizations"] = visualizations[:max_views]
 
-        def fallback_sections(text: str, limit: int) -> list:
-            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-            if len(paragraphs) >= 2:
-                return [(None, p) for p in paragraphs[:limit]]
-            # 最后兜底：按句号拆分
-            sentences = [s.strip() for s in re.split(r'[。！？]', text) if s.strip()]
-            chunks = []
-            buffer = []
-            for sentence in sentences:
-                buffer.append(sentence)
-                if len("".join(buffer)) > 200:
-                    chunks.append("。".join(buffer))
-                    buffer = []
-                if len(chunks) >= limit:
-                    break
-            if buffer and len(chunks) < limit:
-                chunks.append("。".join(buffer))
-            return [(None, chunk) for chunk in chunks if chunk]
-
-        max_views = max(1, min(request.max_views, 6))
-        sections = split_sections(request.answer)
-        if not sections or len(sections) <= 1:
-            sections = fallback_sections(request.answer, max_views)
-
-        visualizations = []
-        for title, content in sections:
-            if len(visualizations) >= max_views:
-                break
-            if not content or len(content) < 40:
-                continue
-            query = request.query
-            display_title = clean_title(title)
-            hint = build_query_hint(display_title, content)
-            if hint:
-                query = f"{query} {hint}"
-            if display_title:
-                query = f"{query} - {display_title}"
-            viz_result = await generate_visualization_for_query(
-                query=query,
-                answer=content,
-                data=request.data,
-                sources=request.sources
-            )
-            if viz_result and viz_result.get("has_visualization"):
-                viz_result["source_title"] = title
-                viz_result["display_title"] = display_title
-                visualizations.append(viz_result)
-
-        if not visualizations:
-            viz_result = await generate_visualization_for_query(
-                query=request.query,
-                answer=request.answer,
-                data=request.data,
-                sources=request.sources
-            )
-            viz_result = _clean_decimal_types(viz_result)
-            return JSONResponse(content=viz_result)
-
-        payload = {
-            "has_visualization": True,
-            "visualizations": visualizations
-        }
-        payload = _clean_decimal_types(payload)
-        return JSONResponse(content=payload)
+        viz_result = _clean_decimal_types(viz_result)
+        return JSONResponse(content=viz_result)
 
     except HTTPException:
         raise

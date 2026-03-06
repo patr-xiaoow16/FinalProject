@@ -894,11 +894,49 @@ const App = {
       payload
     }) => {
       if (!payload || typeof payload !== 'object') return ''
+
+      const toReadableText = (value, fallback = '未明确') => {
+        if (value === null || value === undefined) return fallback
+        if (typeof value !== 'string') {
+          try {
+            return JSON.stringify(value, null, 2)
+          } catch (e) {
+            return String(value)
+          }
+        }
+        let text = value.trim()
+        if (!text) return fallback
+
+        // 去除 markdown 代码块，避免渲染成黑底代码
+        const fencedMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+        if (fencedMatch && fencedMatch[1]) {
+          text = fencedMatch[1].trim()
+        }
+
+        // 如果仍是JSON，提取可读字段
+        const parsed = parseJsonObjectFromText(text)
+        if (parsed && typeof parsed === 'object') {
+          const nested = unwrapBusinessGuidancePayload(parsed)
+          if (nested && nested !== parsed) {
+            return toReadableText(nested.expected_performance || nested.expectedPerformance || '', fallback)
+          }
+          const candidate = [
+            parsed.expected_performance,
+            parsed.expectedPerformance,
+            parsed.summary,
+            parsed.content
+          ].find(item => typeof item === 'string' && item.trim())
+          if (candidate) return candidate.trim()
+          return fallback
+        }
+        return text
+      }
+
       const titleCompany = companyName || '公司'
       const titleYear = year ? `${year}年` : ''
       const title = `${titleCompany}${titleYear}业绩指引分析`
       const guidancePeriod = payload.guidance_period || payload.guidancePeriod || `${year || ''}年度`
-      const expectedPerformance = payload.expected_performance || payload.expectedPerformance || ''
+      const expectedPerformance = toReadableText(payload.expected_performance || payload.expectedPerformance || '', '未明确')
       const metricHighlights = []
       const parentProfit = payload.parent_net_profit_range || payload.parentNetProfitRange
       const parentProfitGrowth = payload.parent_net_profit_growth_range || payload.parentNetProfitGrowthRange
@@ -911,15 +949,12 @@ const App = {
       if (epsRange) metricHighlights.push(`基本每股收益：${epsRange}`)
       if (revenueRange) metricHighlights.push(`营业收入：${revenueRange}`)
 
-      const keyMetrics = Array.isArray(payload.key_metrics || payload.keyMetrics)
-        ? (payload.key_metrics || payload.keyMetrics)
-        : []
-      const businessGuidance = Array.isArray(payload.business_specific_guidance || payload.businessSpecificGuidance)
-        ? (payload.business_specific_guidance || payload.businessSpecificGuidance)
-        : []
-      const riskWarnings = Array.isArray(payload.risk_warnings || payload.riskWarnings)
-        ? (payload.risk_warnings || payload.riskWarnings)
-        : []
+      const keyMetrics = normalizeGuidanceList(payload.key_metrics || payload.keyMetrics, 'key_metrics')
+      const businessGuidance = normalizeGuidanceList(
+        payload.business_specific_guidance || payload.businessSpecificGuidance,
+        'business_specific_guidance'
+      )
+      const riskWarnings = normalizeGuidanceList(payload.risk_warnings || payload.riskWarnings, 'risk_warnings')
 
       const listBlock = (items = [], fallback = '未明确') => {
         const list = items.filter(Boolean)
@@ -934,6 +969,45 @@ const App = {
       parts.push(`## **三、关键执行路径**\n${listBlock(businessGuidance)}`)
       parts.push(`## **四、不确定性与边界**\n${listBlock(riskWarnings)}`)
       return parts.join('\n\n')
+    }
+
+    const buildBusinessGuidanceChatNarrative = (payload = {}) => {
+      if (!payload || typeof payload !== 'object') return ''
+      const goalInsight = String(payload.expected_performance || payload.expectedPerformance || '').trim()
+      const metricList = normalizeGuidanceList(payload.key_metrics || payload.keyMetrics, 'key_metrics')
+      const pathList = normalizeGuidanceList(
+        payload.business_specific_guidance || payload.businessSpecificGuidance,
+        'business_specific_guidance'
+      )
+      const riskList = normalizeGuidanceList(payload.risk_warnings || payload.riskWarnings, 'risk_warnings')
+
+      const joinNarrative = (items = [], limit = 2) => {
+        const list = Array.isArray(items) ? items.map(v => String(v || '').trim()).filter(Boolean) : []
+        if (!list.length) return '数据不足，无法生成洞察'
+        return list.slice(0, limit).join('；')
+      }
+
+      const metricInsight = joinNarrative(metricList, 3)
+      const pathInsight = joinNarrative(pathList, 2)
+      const riskInsight = joinNarrative(riskList, 2)
+      const goalText = goalInsight || '数据不足，无法生成洞察'
+
+      const lines = [
+        '## **业绩指引洞察**',
+        '',
+        '### **1. 经营目标方向**',
+        `**洞察：** ${goalText}`,
+        '',
+        '### **2. 核心指标锚点**',
+        `**洞察：** ${metricInsight}`,
+        '',
+        '### **3. 关键执行路径**',
+        `**洞察：** ${pathInsight}`,
+        '',
+        '### **4. 不确定性与边界**',
+        `**洞察：** ${riskInsight}`
+      ]
+      return lines.join('\n')
     }
 
     const buildDupontMarkdown = ({
@@ -1032,42 +1106,148 @@ const App = {
       return `<div class="summary-title">表格洞察</div><div class="summary-block">${items.join('')}</div>`
     }
 
+    const parseJsonObjectFromText = (text) => {
+      if (typeof text !== 'string') return null
+      const raw = text.trim()
+      if (!raw) return null
+      try {
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? parsed : null
+      } catch (e) {
+        const match = raw.match(/\{[\s\S]*\}/)
+        if (!match) return null
+        try {
+          const parsed = JSON.parse(match[0])
+          return parsed && typeof parsed === 'object' ? parsed : null
+        } catch (err) {
+          return null
+        }
+      }
+    }
+
+    const unwrapBusinessGuidancePayload = (data) => {
+      if (!data || typeof data !== 'object') return null
+      if (data.business_guidance && typeof data.business_guidance === 'object') return data.business_guidance
+      if (data.businessGuidance && typeof data.businessGuidance === 'object') return data.businessGuidance
+      const hasCoreField = [
+        'guidance_period',
+        'expected_performance',
+        'key_metrics',
+        'business_specific_guidance',
+        'risk_warnings'
+      ].some(key => data[key] !== undefined)
+      return hasCoreField ? data : null
+    }
+
+    /** 将业绩指引中的列表项（字符串或对象）统一转为可读字符串数组，避免对象数组导致“未明确” */
+    const normalizeGuidanceList = (items, kind) => {
+      if (items == null) return []
+      if (!Array.isArray(items)) {
+        if (typeof items === 'string') return items.trim() ? [items.trim()] : []
+        return []
+      }
+      const out = []
+      for (const item of items) {
+        if (typeof item === 'string') {
+          const t = item.trim()
+          if (t) out.push(t)
+          continue
+        }
+        if (item == null || typeof item !== 'object') continue
+        if (kind === 'key_metrics') {
+          const name = item['指标名'] ?? item.metric ?? item.name ?? '指标'
+          const val = item['数值'] ?? item.value ?? '—'
+          const chg = item['变化'] ?? item.change
+          const interp = item['解读'] ?? item.interpretation
+          const parts = [`${name}：${val}`]
+          if (chg != null && String(chg).trim()) parts.push(`变化${chg}`)
+          if (interp != null && String(interp).trim()) parts.push(String(interp))
+          out.push(parts.join('，'))
+        } else if (kind === 'business_specific_guidance') {
+          const action = item['执行动作'] ?? item.action ?? '执行动作'
+          const evidence = item['证据'] ?? item.evidence
+          const impact = item['影响'] ?? item.impact
+          const parts = [String(action)]
+          if (evidence != null && String(evidence).trim()) parts.push(`证据：${evidence}`)
+          if (impact != null && String(impact).trim()) parts.push(`影响：${impact}`)
+          out.push(parts.join('；'))
+        } else if (kind === 'risk_warnings') {
+          const risk = item['风险名称'] ?? item.risk ?? '风险'
+          const impactObj = item['影响对象'] ?? item.impact
+          const metric = item['指标变化'] ?? item.metric_change
+          const prob = item['概率'] ?? item.probability
+          const parts = [String(risk)]
+          if (impactObj != null && String(impactObj).trim()) parts.push(`影响对象：${impactObj}`)
+          if (metric != null && String(metric).trim()) parts.push(`指标变化：${metric}`)
+          if (prob != null && String(prob).trim()) parts.push(`概率：${prob}`)
+          out.push(parts.join('；'))
+        } else {
+          const s = String(item).trim()
+          if (s) out.push(s)
+        }
+      }
+      return out
+    }
+
     const extractBusinessGuidancePayload = (result) => {
       if (!result || typeof result !== 'object') return null
+      // 支持完整报告结构：{ business_guidance, extracted_data, ... }（如保存的报告或合并接口）
+      const topLevel = result.business_guidance != null ? result.business_guidance : result.businessGuidance
+      const structuredPayloadFromTop = unwrapBusinessGuidancePayload(topLevel)
+      if (structuredPayloadFromTop) return structuredPayloadFromTop
+
       const structured = result.structured_response || {}
-      if (structured.business_guidance) return structured.business_guidance
+      const structuredPayload = unwrapBusinessGuidancePayload(structured)
+      if (structuredPayload) return structuredPayload
+
+      const hasListData = (p) => {
+        if (!p || typeof p !== 'object') return false
+        const km = p.key_metrics || p.keyMetrics
+        const bg = p.business_specific_guidance || p.businessSpecificGuidance
+        const rw = p.risk_warnings || p.riskWarnings
+        return (Array.isArray(km) && km.length > 0) ||
+          (Array.isArray(bg) && bg.length > 0) ||
+          (Array.isArray(rw) && rw.length > 0)
+      }
+
+      // 优先从 tool_calls[].tool_output / raw_output 取完整 payload（generate-section 的完整数据在这里）
       const toolCall = Array.isArray(result.tool_calls)
         ? result.tool_calls.find(tc => tc.tool_name === 'generate_business_guidance')
         : null
-      if (!toolCall) return null
-      let output = toolCall.tool_output || toolCall.output || null
-      let rawOutput = output && output.raw_output !== undefined ? output.raw_output : null
-      if (typeof rawOutput === 'string') {
-        try {
-          rawOutput = JSON.parse(rawOutput)
-        } catch (e) {
-          rawOutput = null
+      if (toolCall) {
+        let output = toolCall.tool_output || toolCall.output || null
+        let rawOutput = output && output.raw_output !== undefined ? output.raw_output : null
+        if (typeof rawOutput === 'string') {
+          rawOutput = parseJsonObjectFromText(rawOutput)
         }
+        const rawPayload = unwrapBusinessGuidancePayload(rawOutput)
+        const outputPayload = unwrapBusinessGuidancePayload(output)
+        if (rawPayload && hasListData(rawPayload)) return rawPayload
+        if (outputPayload && hasListData(outputPayload)) return outputPayload
+        if (rawPayload) return rawPayload
+        if (outputPayload) return outputPayload
+        if (rawOutput && typeof rawOutput === 'object') {
+          const merged = { ...rawOutput }
+          if (output && typeof output === 'object') {
+            Object.keys(output).forEach(key => {
+              if (merged[key] === undefined) merged[key] = output[key]
+            })
+          }
+          const mergedPayload = unwrapBusinessGuidancePayload(merged)
+          if (mergedPayload) return mergedPayload
+          return merged
+        }
+        if (output && typeof output === 'object') return output
       }
-      if (rawOutput && typeof rawOutput === 'object') {
-        const merged = { ...rawOutput }
-        if (output && typeof output === 'object') {
-          Object.keys(output).forEach(key => {
-            if (merged[key] === undefined) {
-              merged[key] = output[key]
-            }
-          })
-        }
-        return merged
-      }
-      if (output && typeof output === 'object') return output
-      if (typeof output === 'string') {
-        try {
-          const parsed = JSON.parse(output)
-          return parsed && typeof parsed === 'object' ? parsed : null
-        } catch (e) {
-          return null
-        }
+
+      // 再尝试从 content/answer 解析（仅作兜底，避免误匹配 markdown 中的花括号）
+      const parsedFromContent = parseJsonObjectFromText(result.content || result.answer || '')
+      const contentPayload = unwrapBusinessGuidancePayload(parsedFromContent)
+      if (contentPayload && hasListData(contentPayload)) return contentPayload
+      if (contentPayload) return contentPayload
+
+      if (typeof (result.content || result.answer) === 'string') {
+        return unwrapBusinessGuidancePayload(parseJsonObjectFromText(result.content || result.answer))
       }
       return null
     }
@@ -1081,9 +1261,18 @@ const App = {
       const nonRecurringProfit = payload.non_recurring_profit_range || payload.nonRecurringProfitRange
       const epsRange = payload.eps_range || payload.epsRange
       const revenueRange = payload.revenue_range || payload.revenueRange
-      const keyMetrics = payload.key_metrics || payload.keyMetrics || []
-      const businessGuidance = payload.business_specific_guidance || payload.businessSpecificGuidance || []
-      const riskWarnings = payload.risk_warnings || payload.riskWarnings || []
+      const keyMetricsNormalized = normalizeGuidanceList(
+        payload.key_metrics || payload.keyMetrics,
+        'key_metrics'
+      )
+      const businessGuidanceNormalized = normalizeGuidanceList(
+        payload.business_specific_guidance || payload.businessSpecificGuidance,
+        'business_specific_guidance'
+      )
+      const riskWarningsNormalized = normalizeGuidanceList(
+        payload.risk_warnings || payload.riskWarnings,
+        'risk_warnings'
+      )
 
       const whatParts = []
       if (guidancePeriod) whatParts.push(`期间：${guidancePeriod}`)
@@ -1096,14 +1285,14 @@ const App = {
       if (nonRecurringProfit) metricParts.push(`扣非净利润：${nonRecurringProfit}`)
       if (epsRange) metricParts.push(`基本每股收益：${epsRange}`)
       if (revenueRange) metricParts.push(`营业收入：${revenueRange}`)
-      const watchList = metricParts.length ? metricParts : (Array.isArray(keyMetrics) ? keyMetrics : [])
+      const watchList = metricParts.length ? metricParts : keyMetricsNormalized
       const watchText = watchList.length ? watchList.join('；') : '年报未明确量化口径'
 
-      const howText = Array.isArray(businessGuidance) && businessGuidance.length
-        ? businessGuidance.join('；')
+      const howText = businessGuidanceNormalized.length
+        ? businessGuidanceNormalized.join('；')
         : '未明确'
-      const riskText = Array.isArray(riskWarnings) && riskWarnings.length
-        ? riskWarnings.join('；')
+      const riskText = riskWarningsNormalized.length
+        ? riskWarningsNormalized.join('；')
         : '未明确'
 
       const items = [
@@ -1162,6 +1351,18 @@ const App = {
       ]
     }
 
+    const toGuidanceCardInsight = (card = {}) => {
+      const insightList = Array.isArray(card?.data?.insights) ? card.data.insights : []
+      const firstInsight = insightList.find(item => item && typeof item === 'object')
+      const conclusion = firstInsight?.description || `${card.question || '业绩指引'}：请结合图表查看关键洞察。`
+      const keyFindings = Array.isArray(firstInsight?.key_findings) ? firstInsight.key_findings : []
+      return {
+        conclusion,
+        key_findings: keyFindings.slice(0, 5),
+        confidence: 'medium'
+      }
+    }
+
     const getGuidanceInsights = (payload = {}, key) => {
       const insightsRoot = payload.visualization_insights || payload.visualizationInsights || {}
       const section = insightsRoot && typeof insightsRoot === 'object' ? insightsRoot[key] : null
@@ -1206,8 +1407,11 @@ const App = {
               contribution: toneCard.contribution
             },
             type: 'insight_card',
-            source: 'guidance_tone'
+            source: 'guidance_tone',
+            isLinkageGenerated: true,
+            viewType: 'comprehensive'
           })
+          cards[cards.length - 1].insight = toGuidanceCardInsight(cards[cards.length - 1])
         }
       }
 
@@ -1265,8 +1469,11 @@ const App = {
               }
             },
             type: 'chart',
-            source: 'guidance_metrics'
+            source: 'guidance_metrics',
+            isLinkageGenerated: true,
+            viewType: 'comprehensive'
           })
+          cards[cards.length - 1].insight = toGuidanceCardInsight(cards[cards.length - 1])
         }
       }
 
@@ -1314,8 +1521,11 @@ const App = {
               }
             },
             type: 'chart',
-            source: 'guidance_execution'
+            source: 'guidance_execution',
+            isLinkageGenerated: true,
+            viewType: 'comprehensive'
           })
+          cards[cards.length - 1].insight = toGuidanceCardInsight(cards[cards.length - 1])
         }
       }
 
@@ -1368,8 +1578,11 @@ const App = {
               }
             },
             type: 'chart',
-            source: 'guidance_risk'
+            source: 'guidance_risk',
+            isLinkageGenerated: true,
+            viewType: 'comprehensive'
           })
+          cards[cards.length - 1].insight = toGuidanceCardInsight(cards[cards.length - 1])
         }
       }
 
@@ -1465,10 +1678,23 @@ const App = {
     }
 
     const normalizeToolOutput = (toolOutput) => {
-      if (toolOutput && typeof toolOutput === 'object' && toolOutput.raw_output !== undefined) {
-        return toolOutput.raw_output
+      if (!toolOutput || typeof toolOutput !== 'object') return toolOutput
+      if (toolOutput.raw_output === undefined) return toolOutput
+      const raw = toolOutput.raw_output
+      let parsedRaw = raw
+      if (typeof raw === 'string') {
+        try {
+          parsedRaw = JSON.parse(raw)
+        } catch (e) {
+          parsedRaw = null
+        }
       }
-      return toolOutput
+      if (parsedRaw && typeof parsedRaw === 'object' && !Array.isArray(parsedRaw)) {
+        const merged = { ...parsedRaw, ...toolOutput }
+        delete merged.raw_output
+        return merged
+      }
+      return raw
     }
 
     const extractBusinessHighlightsPayload = (result) => {
@@ -1718,7 +1944,26 @@ const App = {
                   answerText = formatted
                 }
               }
-              if (answerText && !visualizationCards.value.some(card => card.source === 'guidance_text_viz')) {
+
+              // 优先使用业绩指引结构化可视化配置直接生成图卡
+              const guidanceCards = buildGuidanceVisualizationCards(payload, question || '业绩指引分析')
+              guidanceCards.forEach((card) => {
+                if (!card || !card.data || !card.data.has_visualization) return
+                const exists = visualizationCards.value.some(existing =>
+                  existing?.id === card.id ||
+                  (existing?.question === card.question && existing?.source === card.source)
+                )
+                if (exists) return
+                visualizationCards.value.push(card)
+              })
+
+              // 同时在聊天区展示洞察摘要（你要求：智能问答界面也要显示洞察）
+              const chatInsights = buildBusinessGuidanceChatNarrative(payload)
+              if (chatInsights) {
+                answerText = chatInsights
+              }
+
+              if (answerText && !result.visualization && !visualizationCards.value.some(card => card.source === 'guidance_text_viz')) {
                 try {
                   const vizResponse = await fetch('/agent/visualize-text', {
                     method: 'POST',
@@ -1733,14 +1978,24 @@ const App = {
                     const textViz = await vizResponse.json()
                     if (textViz && textViz.visualizations && Array.isArray(textViz.visualizations)) {
                       textViz.visualizations.forEach((viz, idx) => {
-                        if (!viz || !viz.has_visualization) return
+                        if (!viz) return
                         visualizationCards.value.push({
                           id: `${Date.now().toString()}-guidance-text-viz-${idx}`,
                           question: sanitizeCardTitle(viz.display_title || viz.query || question || '业绩指引分析可视化'),
                           timestamp: new Date(),
-                          data: viz,
+                          data: {
+                            has_visualization: true,
+                            ...viz
+                          },
                           type: 'chart',
-                          source: 'guidance_text_viz'
+                          source: 'guidance_text_viz',
+                          isLinkageGenerated: true,
+                          viewType: 'comprehensive',
+                          insight: {
+                            conclusion: '自动从业绩指引文本提取的补充图表洞察。',
+                            key_findings: [],
+                            confidence: 'medium'
+                          }
                         })
                       })
                     } else if (textViz && textViz.has_visualization) {
@@ -1750,7 +2005,14 @@ const App = {
                         timestamp: new Date(),
                         data: textViz,
                         type: 'chart',
-                        source: 'guidance_text_viz'
+                        source: 'guidance_text_viz',
+                        isLinkageGenerated: true,
+                        viewType: 'comprehensive',
+                        insight: {
+                          conclusion: '自动从业绩指引文本提取的补充图表洞察。',
+                          key_findings: [],
+                          confidence: 'medium'
+                        }
                       })
                     }
                   } else {
@@ -1759,6 +2021,24 @@ const App = {
                 } catch (error) {
                   console.warn('⚠️ 业绩指引文本可视化请求异常:', error)
                 }
+              }
+            } else {
+              // 兜底：当后端返回文本中夹带JSON时，前端二次抽取并转为结构化文字
+              const fallbackPayload = unwrapBusinessGuidancePayload(parseJsonObjectFromText(answerText))
+              if (fallbackPayload) {
+                const fullMarkdown = buildBusinessGuidanceMarkdown({
+                  companyName,
+                  year,
+                  payload: fallbackPayload
+                })
+                if (fullMarkdown) {
+                  answerText = fullMarkdown
+                } else {
+                  const formatted = formatBusinessGuidanceSummary(fallbackPayload)
+                  if (formatted) answerText = formatted
+                }
+                const chatInsights = buildBusinessGuidanceChatNarrative(fallbackPayload)
+                if (chatInsights) answerText = chatInsights
               }
             }
           }
@@ -1799,7 +2079,7 @@ const App = {
               }
             }
 
-            if (answerText && !visualizationCards.value.some(card => card.source === 'text_viz')) {
+            if (answerText && !result.visualization && !visualizationCards.value.some(card => card.source === 'text_viz')) {
               try {
                 const vizResponse = await fetch('/agent/visualize-text', {
                   method: 'POST',
@@ -1814,12 +2094,15 @@ const App = {
                   const textViz = await vizResponse.json()
                   if (textViz && textViz.visualizations && Array.isArray(textViz.visualizations)) {
                     textViz.visualizations.forEach((viz, idx) => {
-                      if (!viz || !viz.has_visualization) return
+                      if (!viz) return
                       visualizationCards.value.push({
                         id: `${Date.now().toString()}-biz-text-viz-${idx}`,
                         question: sanitizeCardTitle(viz.display_title || viz.query || question || '业务亮点分析可视化'),
                         timestamp: new Date(),
-                        data: viz,
+                        data: {
+                          has_visualization: true,
+                          ...viz
+                        },
                         type: 'chart',
                         source: 'text_viz'
                       })
