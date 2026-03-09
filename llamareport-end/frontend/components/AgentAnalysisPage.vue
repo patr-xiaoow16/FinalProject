@@ -1968,6 +1968,39 @@ export default {
           return header + '\n' + sep + '\n' + mid + dataRow
         }
       )
+      // 移除表格中的“伪数据分隔行”（|---|---|...|），仅保留表头下第一条分隔线
+      const lines = out.split('\n')
+      const cleaned = []
+      let inTable = false
+      let dividerSeen = false
+      const isPipe = (line) => {
+        const t = (line || '').trim()
+        return t.startsWith('|') && t.endsWith('|')
+      }
+      const isDivider = (line) => /^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|$/.test((line || '').trim())
+      for (const line of lines) {
+        if (!isPipe(line)) {
+          inTable = false
+          dividerSeen = false
+          cleaned.push(line)
+          continue
+        }
+        if (!inTable) {
+          inTable = true
+          dividerSeen = false
+          cleaned.push(line)
+          continue
+        }
+        if (isDivider(line)) {
+          if (!dividerSeen) {
+            cleaned.push(line)
+            dividerSeen = true
+          }
+          continue
+        }
+        cleaned.push(line)
+      }
+      out = cleaned.join('\n')
       return out
     },
     collapseSingleCellPipeRows(text) {

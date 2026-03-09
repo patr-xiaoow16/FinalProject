@@ -730,6 +730,25 @@ const App = {
         .map(cell => cleanTableCellText(cell))
     }
 
+    const isMarkdownDividerCells = (cells = []) => {
+      if (!Array.isArray(cells) || cells.length === 0) return false
+      // 识别 `---` / `:---` / `---:` / `:---:` 这类 Markdown 分隔单元格
+      return cells.every(cell => /^:?-{3,}:?$/.test(String(cell || '').trim()))
+    }
+
+    const sanitizeTableRows = (rows = []) => {
+      if (!Array.isArray(rows)) return []
+      return rows.filter((row) => {
+        if (!Array.isArray(row)) return false
+        const cleaned = row.map(cell => String(cell ?? '').trim())
+        // 过滤整行都是空或 `---` 的伪数据行
+        const hasValue = cleaned.some(cell => cell)
+        if (!hasValue) return false
+        if (isMarkdownDividerCells(cleaned)) return false
+        return true
+      })
+    }
+
     const extractMarkdownTables = (text = '') => {
       const lines = String(text || '').split('\n')
       const tables = []
@@ -749,13 +768,18 @@ const App = {
             }
             if (!(rowLine.startsWith('|') && rowLine.endsWith('|'))) break
             const rowCells = splitPipeCells(rowLine)
+            if (isMarkdownDividerCells(rowCells)) {
+              i += 1
+              continue
+            }
             const normalized = rowCells.slice(0, headers.length)
             while (normalized.length < headers.length) normalized.push('')
             rows.push(normalized)
             i += 1
           }
-          if (headers.length >= 2 && rows.length > 0) {
-            tables.push({ headers, rows })
+          const normalizedRows = sanitizeTableRows(rows)
+          if (headers.length >= 2 && normalizedRows.length > 0) {
+            tables.push({ headers, rows: normalizedRows })
           }
           continue
         }
@@ -821,27 +845,6 @@ const App = {
         tables.cash_flow
       ].filter(table => table && isMeaningfulTable(table))
 
-      const toMetricBullets = (table, maxRows = 4) => {
-        if (!table) return ''
-        const headers = Array.isArray(table.headers) ? table.headers : []
-        const rows = Array.isArray(table.rows) ? table.rows : []
-        const pickedRows = rows.filter(row => Array.isArray(row)).slice(0, maxRows)
-        if (!pickedRows.length || headers.length < 2) return ''
-        return pickedRows.map((row) => {
-          const metric = row[0] || '指标'
-          const parts = []
-          for (let i = 1; i < Math.min(row.length, headers.length); i += 1) {
-            const label = headers[i]
-            const value = row[i]
-            if (value !== undefined && value !== null && String(value).trim() !== '') {
-              parts.push(`${label}：${value}`)
-            }
-          }
-          const detail = parts.length ? `（${parts.join('；')}）` : ''
-          return `- ${metric}${detail}`
-        }).join('\n')
-      }
-
       const toBulletParagraphs = (text = '') => {
         const cleaned = String(text || '').trim()
         if (!cleaned) return ''
@@ -868,24 +871,22 @@ const App = {
         sectionBlocks.push(`## **综合判断**\n${toBulletParagraphs(summary.overall)}`)
       }
 
-      const metricsBlocks = tableList.map((table) => {
-        const titleText = sanitizeCardTitle(table.title || '关键指标')
-        const bullets = toMetricBullets(table, 4)
-        if (!bullets) return ''
-        return `#### ${titleText}\n${bullets}`
-      }).filter(Boolean)
-
       const supplement = rawContent && typeof rawContent === 'string'
         ? rawContent.trim()
         : ''
 
+      const stripMarkdownRules = (text = '') => String(text || '')
+        .replace(/^\s*---+\s*$/gm, '')
+        .replace(/^\s*___+\s*$/gm, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+
       const parts = [`## ${title}`]
       if (sectionBlocks.length) parts.push(sectionBlocks.join('\n\n'))
-      if (metricsBlocks.length) parts.push(`## **关键指标速览**\n${metricsBlocks.join('\n\n')}`)
       if (supplement && !supplement.startsWith('{') && !supplement.startsWith('[')) {
-        parts.push(`${supplement}`)
+        parts.push(`${stripMarkdownRules(supplement)}`)
       }
-      return parts.join('\n\n')
+      return stripMarkdownRules(parts.join('\n\n'))
     }
 
     const buildBusinessGuidanceMarkdown = ({
@@ -2397,7 +2398,7 @@ const App = {
                       table: {
                         title,
                         headers: table.headers,
-                        rows: table.rows,
+                        rows: sanitizeTableRows(table.rows),
                         insight: buildEarningsTableInsight(table, title)
                       }
                     }
@@ -2523,7 +2524,7 @@ const App = {
                       table: {
                         title,
                         headers: table.headers,
-                        rows: table.rows,
+                        rows: sanitizeTableRows(table.rows),
                         insight: `${title}：自动提取自估值锚点分析报告。`
                       }
                     }
@@ -2646,7 +2647,7 @@ const App = {
                       table: {
                         title,
                         headers: table.headers,
-                        rows: table.rows,
+                        rows: sanitizeTableRows(table.rows),
                         insight: `${title}：自动提取自综合投资策略分析报告。`
                       }
                     }

@@ -46,31 +46,13 @@
                 class="quick-btn profit-forecast" 
                 @click.stop="toggleProfitForecastSubButtons"
                 :disabled="loading"
-                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：相关性分析、聚类分析、因子分析、盈利预测、估值锚点分析、综合投资策略'"
+                :title="showProfitForecastSubButtons ? '收起子菜单' : '点击展开：盈利预测、估值锚点分析、综合投资策略'"
               >
                 <span class="btn-icon">📈</span>
                 <span class="btn-text">投资策略</span>
                 <span class="sub-arrow">{{ showProfitForecastSubButtons ? '▼' : '▶' }}</span>
               </button>
               <div v-show="showProfitForecastSubButtons" class="profit-forecast-sub-buttons">
-                <button 
-                  class="quick-btn sub-btn" 
-                  @click="handleQuickAnalysis('profit_forecast', 'correlation_only')"
-                  :disabled="loading"
-                  title="仅生成相关性分析"
-                >相关性分析</button>
-                <button 
-                  class="quick-btn sub-btn" 
-                  @click="handleQuickAnalysis('profit_forecast', 'clustering')"
-                  :disabled="loading"
-                  title="仅生成聚类分析"
-                >聚类分析</button>
-                <button 
-                  class="quick-btn sub-btn" 
-                  @click="handleQuickAnalysis('profit_forecast', 'factor_only')"
-                  :disabled="loading"
-                  title="仅生成因子分析"
-                >因子分析</button>
                 <button 
                   class="quick-btn sub-btn" 
                   @click="handleQuickAnalysis('profit_forecast', 'earnings_forecast')"
@@ -339,6 +321,39 @@ export default {
           return header + '\n' + sep + '\n' + mid + dataRow;
         }
       );
+      // 6. 移除表格中的“伪数据分隔行”（|---|---|...|），仅保留表头下第一条分隔线
+      const lines = out.split('\n');
+      const cleaned = [];
+      let inTable = false;
+      let dividerSeen = false;
+      const isPipe = (line) => {
+        const t = (line || '').trim();
+        return t.startsWith('|') && t.endsWith('|');
+      };
+      const isDivider = (line) => /^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|$/.test((line || '').trim());
+      for (const line of lines) {
+        if (!isPipe(line)) {
+          inTable = false;
+          dividerSeen = false;
+          cleaned.push(line);
+          continue;
+        }
+        if (!inTable) {
+          inTable = true;
+          dividerSeen = false;
+          cleaned.push(line);
+          continue;
+        }
+        if (isDivider(line)) {
+          if (!dividerSeen) {
+            cleaned.push(line);
+            dividerSeen = true;
+          }
+          continue;
+        }
+        cleaned.push(line);
+      }
+      out = cleaned.join('\n');
       return out;
     },
     /**

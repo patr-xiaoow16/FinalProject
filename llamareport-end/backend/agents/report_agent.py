@@ -6,7 +6,7 @@
 import logging
 import re
 import warnings
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.tools import FunctionTool, QueryEngineTool
 from llama_index.core import Settings
@@ -125,6 +125,73 @@ class ReportAgent:
         except Exception as e:
             logger.warning(f"Failed to serialize tool_output: {str(e)}, converting to string")
             return str(tool_output)
+
+    def _build_default_financial_tables(self, year: str) -> Dict[str, Any]:
+        prev_year = str(int(year) - 1) if str(year).isdigit() else str(year)
+        headers = ["指标", str(year), prev_year, "同比变动"]
+        return {
+            "balance_sheet_assets": {
+                "title": "资产结构表",
+                "headers": headers,
+                "insight": "未生成洞察",
+                "rows": [["资产总额", "/", "/", "/"]],
+            },
+            "balance_sheet_liabilities": {
+                "title": "负债结构表",
+                "headers": headers,
+                "insight": "未生成洞察",
+                "rows": [["负债总额", "/", "/", "/"]],
+            },
+            "income_statement_revenue": {
+                "title": "营业收入结构表",
+                "headers": headers,
+                "insight": "未生成洞察",
+                "rows": [["营业收入合计", "/", "/", "/"]],
+            },
+            "income_statement_expense": {
+                "title": "营业支出结构表",
+                "headers": headers,
+                "insight": "未生成洞察",
+                "rows": [["营业支出合计", "/", "/", "/"]],
+            },
+            "cash_flow": {
+                "title": "现金流量明细",
+                "headers": headers,
+                "insight": "未生成洞察",
+                "rows": [["经营活动现金流", "/", "/", "/"]],
+            },
+        }
+
+    def _normalize_financial_tables(self, tables: Any, year: str) -> Dict[str, Any]:
+        required_keys = [
+            "balance_sheet_assets",
+            "balance_sheet_liabilities",
+            "income_statement_revenue",
+            "income_statement_expense",
+            "cash_flow",
+        ]
+        defaults = self._build_default_financial_tables(year)
+        if not isinstance(tables, dict):
+            return defaults
+        normalized: Dict[str, Any] = {}
+        for key in required_keys:
+            table = tables.get(key)
+            if not isinstance(table, dict):
+                normalized[key] = defaults[key]
+                continue
+            rows = table.get("rows")
+            headers = table.get("headers")
+            if not isinstance(rows, list) or len(rows) == 0:
+                rows = defaults[key]["rows"]
+            if not isinstance(headers, list) or len(headers) < 3:
+                headers = defaults[key]["headers"]
+            normalized[key] = {
+                "title": table.get("title") or defaults[key]["title"],
+                "headers": headers,
+                "insight": table.get("insight") or defaults[key]["insight"],
+                "rows": rows,
+            }
+        return normalized
     
     def _setup_agent(self):
         """设置 Agent 和工具"""
@@ -832,27 +899,35 @@ class ReportAgent:
                                         raw_output = {}
                                 if isinstance(raw_output, dict):
                                     summary = raw_output.get("summary")
-                                    tables = raw_output.get("visualization_tables")
+                                    year_value = str(event.tool_kwargs.get("year", ""))
+                                    tables = self._normalize_financial_tables(
+                                        raw_output.get("visualization_tables"),
+                                        year=year_value,
+                                    )
+                                    raw_output["visualization_tables"] = tables
+                                    tool_output_serializable = raw_output
                                 else:
                                     summary = None
-                                    tables = None
-                                if tables:
-                                    visualization_data = {
-                                        "has_visualization": True,
-                                        "type": "financial_tables",
-                                        "visualization_type": "table",
-                                        "tables": [
-                                            tables.get("balance_sheet_assets") if isinstance(tables, dict) else None,
-                                            tables.get("balance_sheet_liabilities") if isinstance(tables, dict) else None,
-                                            tables.get("income_statement_revenue") if isinstance(tables, dict) else None,
-                                            tables.get("income_statement_expense") if isinstance(tables, dict) else None,
-                                            tables.get("cash_flow") if isinstance(tables, dict) else None
-                                        ]
+                                    tables = self._build_default_financial_tables(str(event.tool_kwargs.get("year", "")))
+                                    tool_output_serializable = {
+                                        "summary": "",
+                                        "visualization_tables": tables,
                                     }
+                                visualization_data = {
+                                    "has_visualization": True,
+                                    "type": "financial_tables",
+                                    "visualization_type": "table",
+                                    "tables": [
+                                        tables.get("balance_sheet_assets"),
+                                        tables.get("balance_sheet_liabilities"),
+                                        tables.get("income_statement_revenue"),
+                                        tables.get("income_statement_expense"),
+                                        tables.get("cash_flow"),
+                                    ],
+                                }
                                 if summary:
                                     financial_summary_override = summary
                                     summary_override = summary
-                                    tool_output_serializable = {"summary": summary}
                             elif tool_name in {
                                 "generate_business_guidance",
                                 "generate_business_highlights",
