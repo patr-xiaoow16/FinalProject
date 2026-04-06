@@ -1,0 +1,26 @@
+摘要
+
+财务分析作为企业经营诊断、投资判断与风险识别的重要基础，其分析过程面临信息体量大、理解成本高、人工处理效率低等问题。近年来，大语言模型（Large Language Models, LLMs）在文本理解、信息抽取、语义推理和自然语言交互方面展现出了重要意义，为复杂财务文档的理解提供了新的解决路径；与此同时，可视分析技术在降低认知负担、增强分析可解释性和支持交互式探索等方面具有独特的优势。
+
+在面向企业财务分析的场景中，仍存在若干挑战，年报在格式结构、表格组织和文本表达上具有异构性，自动解析的过程容易受到跨页表格、文本与数据割裂等因素的影响，难以稳定形成可分析的结构化表示。此外，大语言模型在财务分析中仍面临着数据准确性不足、推理过程不透明、结构约束薄弱等挑战。同时，现有的财务可视化方法更多侧重于静态展示，难以有效表达指标之间的层级关系、洞察提炼与交互探索，因而在决策支持场景中的辅助作用有限。
+
+针对上述问题，本文聚焦以下核心问题：如何从复杂年报中抽取并组织可追溯的财务数据与文本；如何在财务分析逻辑路径下运用大语言模型；如何构建面向财务决策支持的智能可视化机制，将财务数据、分析路径与洞察结果统一到可交互的可视分析框架之中。为此，本文提出了一种面向企业财务决策支持的大模型驱动交互式可视分析框架，将年报解析、检索增强、Agent 编排、智能可视化生成与多视图交互分析整合为完整闭环。
+
+为验证所提框架的有效性与可用性，本文进一步实现了 FinDecipher 原型系统。该研究的评估工作由案例分析、用户实验和专家评估组成。案例分析选取真实企业年报作为对象，对系统的自动解析能力、指标计算准确性、智能可视化生成效果及投资策略支持能力进行综合验证。在 20 位参与者的用户实验和 2 位专家评估中，我们发现 FinDecipher 在提升财务分析效率与支持用户理解复杂财务数据做出决策方面具有较好的应用价值与实践可行性。
+
+关键词：大语言模型，财务分析，智能可视化，可视分析，决策支持
+中图分类号：TP319
+
+
+Abstract
+
+Financial analysis serves as an important foundation for business diagnosis, investment judgment, and risk identification. However, its analytical process is increasingly challenged by large volumes of information, high cognitive costs, and low manual processing efficiency. In recent years, Large Language Models (LLMs) have demonstrated significant potential in text understanding, information extraction, semantic reasoning, and natural language interaction, providing a new approach for understanding complex financial documents. Meanwhile, visual analytics offers unique advantages in reducing cognitive burden, improving interpretability, and supporting interactive exploration.
+
+However, several issues and challenges remain in the context of financial analysis. Annual reports are highly heterogeneous in terms of format structure, table organization, and textual expression. The automatic parsing process is therefore easily affected by cross-page tables, the separation between textual narratives and numerical data, and other factors, making it difficult to construct stable and analyzable structured representations. In addition, LLMs still face challenges in financial analysis, including insufficient data accuracy, opaque reasoning processes, and weak structural constraints. At the same time, existing financial visualization methods tend to focus more on static presentation, and are limited in expressing hierarchical relationships among indicators, insight extraction, and interactive exploration, thereby reducing their effectiveness in decision-support scenarios.
+
+To address these issues, this study focuses on the following core questions: how to extract and organize traceable financial data and textual evidence from complex annual reports; how to apply LLMs under financially grounded analytical logic; and how to build an intelligent visualization mechanism for financial decision support that unifies financial data, analytical processes, and insight results within an interactive visual analytics framework. To this end, this thesis proposes an LLM-driven interactive visual analytics framework for enterprise financial decision support, integrating annual report parsing, retrieval augmentation, agent orchestration, intelligent visualization generation, and multi-view interaction into a complete closed-loop pipeline.
+
+To validate the effectiveness and usability of the proposed framework, this study further implements a prototype system named FinDecipher. The evaluation consists of both case studies and user experiments. In the case study, real-world corporate annual reports are selected to comprehensively examine the system’s automatic parsing capability, the accuracy of financial indicator calculation, the effectiveness of intelligent visualization generation, and its ability to support investment strategy analysis. In a user study involving 20 participants, the results show that FinDecipher demonstrates strong practical value and feasibility in improving the efficiency of financial analysis and supporting users in understanding complex financial data for decision-making.
+
+Keywords: Large Language Models, Financial Analysis, Intelligent Visual Analytics, Visual Analytics, Decision Support
+Chinese Library Classification: TP319
