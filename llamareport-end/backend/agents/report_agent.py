@@ -22,6 +22,9 @@ from agents.report_tools import generate_profit_forecast_and_valuation
 from agents.report_common import retrieve_financial_data, retrieve_business_data
 from agents.visualization_agent import generate_visualization_for_query
 from agents.dupont_tools import generate_dupont_analysis
+from agents.evidence_mapping import build_evidence_mapping
+from agents.section_response import build_section_success_response
+from agents.source_utils import coerce_to_mapping, collect_sources_from_payload, merge_sources
 
 logger = logging.getLogger(__name__)
 
@@ -679,14 +682,15 @@ class ReportAgent:
                                     if cluster_lines:
                                         parts.append(f"**聚类分组：**\n" + "\n".join(cluster_lines))
                             summary_text = "\n\n".join(p for p in parts if p)
-                return {
-                    "status": "success",
-                    "section_name": section_name,
-                    "content": summary_text or "",
-                    "structured_response": {"profit_forecast_and_valuation": tool_output},
-                    "visualization": None,
-                    "tool_calls": []
-                }
+                return build_section_success_response(
+                    section_name=section_name,
+                    content=summary_text or "",
+                    structured_response={"profit_forecast_and_valuation": tool_output},
+                    visualization=None,
+                    tool_calls=[],
+                    sources=tool_output.get("sources") if isinstance(tool_output, dict) else [],
+                    evidence_mapping=tool_output.get("evidence_mapping") if isinstance(tool_output, dict) else [],
+                )
 
             # 使用query管线，确保可视化与精简输出一致
             result = await self.query(query, query_type="section", enable_visualization=False)
@@ -731,14 +735,15 @@ class ReportAgent:
             
             logger.info(f"✅ 章节生成成功: {section_name}")
             
-            return {
-                "status": "success",
-                "section_name": section_name,
-                "content": result.get("answer", ""),
-                "structured_response": result.get("structured_response"),
-                "visualization": result.get("visualization"),
-                "tool_calls": result.get("tool_calls", [])
-            }
+            return build_section_success_response(
+                section_name=section_name,
+                content=result.get("answer", ""),
+                structured_response=result.get("structured_response"),
+                visualization=result.get("visualization"),
+                tool_calls=result.get("tool_calls", []),
+                sources=result.get("sources", []),
+                evidence_mapping=result.get("evidence_mapping", []),
+            )
             
         except Exception as e:
             logger.error(f"❌ 生成章节失败: {str(e)}")
@@ -891,12 +896,8 @@ class ReportAgent:
                             # 如果是财务点评工具，提取可视化表格并精简输出
                             if tool_name == "generate_financial_review" and isinstance(tool_output_serializable, dict):
                                 raw_output = tool_output_serializable.get("raw_output", tool_output_serializable)
-                                if isinstance(raw_output, str):
-                                    try:
-                                        import json
-                                        raw_output = json.loads(raw_output)
-                                    except Exception:
-                                        raw_output = {}
+                                if not isinstance(raw_output, dict):
+                                    raw_output = coerce_to_mapping(raw_output)
                                 if isinstance(raw_output, dict):
                                     summary = raw_output.get("summary")
                                     year_value = str(event.tool_kwargs.get("year", ""))
@@ -935,12 +936,8 @@ class ReportAgent:
                                 "generate_dupont_analysis"
                             } and isinstance(tool_output_serializable, dict):
                                 raw_output = tool_output_serializable.get("raw_output", tool_output_serializable)
-                                if isinstance(raw_output, str):
-                                    try:
-                                        import json
-                                        raw_output = json.loads(raw_output)
-                                    except Exception:
-                                        raw_output = {}
+                                if not isinstance(raw_output, dict):
+                                    raw_output = coerce_to_mapping(raw_output)
                                 if hasattr(raw_output, "model_dump"):
                                     try:
                                         raw_output = raw_output.model_dump()
@@ -1108,7 +1105,13 @@ class ReportAgent:
                                             tool_output_serializable.setdefault("summary", summary_text)
                                     else:
                                         summary_override = summary_text
-                                        tool_output_serializable = {"summary": summary_text}
+                                        if isinstance(tool_output_serializable, dict):
+                                            tool_output_serializable.setdefault("summary", summary_text)
+                                        else:
+                                            tool_output_serializable = {
+                                                "summary": summary_text,
+                                                "raw_output": tool_output_serializable,
+                                            }
 
                             # 确保工具输出是可序列化的字典格式
                             tool_result = {
@@ -1140,24 +1143,12 @@ class ReportAgent:
                                 and isinstance(tool_output_serializable, dict)
                             ):
                                 raw_output = tool_output_serializable.get("raw_output")
-                                if isinstance(raw_output, str):
-                                    try:
-                                        import json
-                                        raw_output = json.loads(raw_output)
-                                    except Exception:
-                                        try:
-                                            import re
-                                            match = re.search(r'\{[\s\S]*\}', raw_output)
-                                            if match:
-                                                raw_output = json.loads(match.group(0))
-                                            else:
-                                                raw_output = {}
-                                        except Exception:
-                                            raw_output = {}
-                                        if not raw_output:
-                                            logger.warning(
-                                                "[business_guidance] raw_output 为字符串但 JSON 解析失败，前端将依赖 raw_output 原文解析"
-                                            )
+                                if not isinstance(raw_output, dict):
+                                    raw_output = coerce_to_mapping(raw_output)
+                                if not raw_output:
+                                    logger.warning(
+                                        "[business_guidance] raw_output 解析失败，前端将依赖 raw_output 原文解析"
+                                    )
                                 if isinstance(raw_output, dict):
                                     before_keys = set(tool_output_serializable.keys())
                                     for key, value in raw_output.items():
@@ -1175,6 +1166,16 @@ class ReportAgent:
                                         )
 
                             tool_results.append(tool_result)
+
+                            tool_sources = collect_sources_from_payload(tool_output_serializable)
+                            if tool_sources:
+                                sources = merge_sources(sources, tool_sources, max_items=12)
+                                logger.info(
+                                    "[Agent Query] 从工具 %s 收集到 %d 个数据来源，当前总数: %d",
+                                    tool_name,
+                                    len(tool_sources),
+                                    len(sources),
+                                )
                             
                             logger.info(f"✅ [Agent Query] [{event_time:.2f}s] 工具 {tool_name} 结果已添加到tool_results，当前总数: {len(tool_results)}")
 
@@ -1319,6 +1320,14 @@ class ReportAgent:
                     logger.warning(f"[Agent Query] 从 response 提取 sources 时出错: {str(response_sources_error)}")
             
             logger.info(f"[Agent Query] 总共提取到 {len(sources)} 个数据来源")
+
+            evidence_mapping = await build_evidence_mapping(
+                answer_text=answer_text,
+                sources=sources,
+                llm=Settings.llm,
+                max_items=5,
+            )
+            logger.info(f"[Agent Query] 生成 evidence_mapping {len(evidence_mapping)} 条")
             
             # 如果 answer 中没有数据来源信息，但 sources 存在，自动在 answer 末尾添加数据来源
             if sources and len(sources) > 0:
@@ -1485,6 +1494,7 @@ class ReportAgent:
                 "question": question,
                 "answer": answer_text,
                 "sources": sources,  # 添加 sources 字段
+                "evidence_mapping": evidence_mapping,
                 "structured_response": response.structured_response if hasattr(response, 'structured_response') else None,
                 "tool_calls": tool_results if tool_results else []  # 确保是列表
             }

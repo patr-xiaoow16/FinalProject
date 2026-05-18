@@ -17,6 +17,7 @@ from models.report_models import (
 from agents.report_common import (
     _validate_and_clean_data,
     retrieve_financial_evidence_bundle,
+    retrieve_financial_evidence_bundle_with_sources,
 )
 
 logger = logging.getLogger(__name__)
@@ -207,13 +208,15 @@ async def generate_financial_review(
         # 1. 一次检索聚合证据（仅检索，不触发子LLM长回答）
         data_retrieval_start = time.time()
         try:
-            evidence_text = await asyncio.to_thread(
-                retrieve_financial_evidence_bundle,
+            evidence_bundle = await asyncio.to_thread(
+                retrieve_financial_evidence_bundle_with_sources,
                 company_name,
                 year,
                 query_engine,
                 15,
             )
+            evidence_text = evidence_bundle.get("text", "")
+            evidence_sources = evidence_bundle.get("sources", [])
             # 使用同一批证据供三表分析，避免重复检索和子回答
             balance_sheet_data = evidence_text
             income_statement_data = evidence_text
@@ -625,6 +628,7 @@ async def generate_financial_review(
         # 添加元数据
         result_dict["company_name"] = company_name
         result_dict["year"] = year
+        result_dict["sources"] = evidence_sources if isinstance(evidence_sources, list) else []
         
         # 数据验证和清理
         result_dict = _validate_and_clean_data(result_dict, FinancialReview)

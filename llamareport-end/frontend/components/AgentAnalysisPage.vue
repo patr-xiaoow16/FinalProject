@@ -105,22 +105,48 @@
 
               <!-- 文本回答 -->
               <div v-if="answer" class="answer-card">
-          <div class="answer-header">
-            <div class="answer-header-left">
-              <span class="answer-icon">📝</span>
-              <h3>分析结果</h3>
-            </div>
-            <div class="answer-header-actions">
-              <button class="action-btn" @click="copyAnswer" title="复制内容">
-                <span>📋</span> 复制
-              </button>
-              <button class="action-btn" @click="exportReport" title="导出报告">
-                <span>💾</span> 导出
-              </button>
-            </div>
-          </div>
-          <div class="answer-content" v-html="parseMarkdown(answer)"></div>
-        </div>
+                <div class="answer-header">
+                  <div class="answer-header-left">
+                    <span class="answer-icon">📝</span>
+                    <h3>分析结果</h3>
+                  </div>
+                  <div class="answer-header-actions">
+                    <button class="action-btn" @click="copyAnswer" title="复制内容">
+                      <span>📋</span> 复制
+                    </button>
+                    <button class="action-btn" @click="exportReport" title="导出报告">
+                      <span>💾</span> 导出
+                    </button>
+                  </div>
+                </div>
+                <div class="answer-content" v-html="parseMarkdown(answer)"></div>
+              </div>
+
+              <div v-if="evidenceMappings.length > 0" class="evidence-card">
+                <div class="evidence-header">
+                  <div class="evidence-header-left">
+                    <span class="evidence-icon">🔎</span>
+                    <h3>结论证据映射</h3>
+                  </div>
+                  <span class="evidence-count">{{ evidenceMappings.length }}</span>
+                </div>
+                <div class="evidence-list">
+                  <div
+                    v-for="(item, idx) in evidenceMappings"
+                    :key="`${idx}-${item.claim}`"
+                    class="evidence-item"
+                  >
+                    <div class="evidence-item-label">关键结论</div>
+                    <div class="evidence-item-claim">{{ item.claim }}</div>
+                    <div class="evidence-item-label">证据摘录</div>
+                    <div class="evidence-item-text">{{ item.evidence }}</div>
+                    <div class="evidence-item-meta">
+                      <span v-if="item.source_page">页码：第{{ item.source_page }}页</span>
+                      <span v-if="item.source_file">{{ item.source_file }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
 
         <!-- 可视化图表区域 -->
         <div v-if="filteredVisualizations.length > 0" class="visualizations-section">
@@ -308,6 +334,7 @@ export default {
       loading: false,
       currentQuestion: '',
       answer: '',
+      evidenceMappings: [],
       visualizations: [],
       structuredData: {
         financialReview: null,
@@ -330,10 +357,11 @@ export default {
   computed: {
     hasContent() {
       const hasAnswer = this.answer && this.answer.trim().length > 0
+      const hasEvidenceMappings = this.evidenceMappings && this.evidenceMappings.length > 0
       const hasViz = this.visualizations && this.visualizations.length > 0
       const hasStructured = this.hasStructuredData
       
-      const result = hasAnswer || hasViz || hasStructured
+      const result = hasAnswer || hasEvidenceMappings || hasViz || hasStructured
       
       // 调试日志（只在状态变化时输出，避免过多日志）
       if (result && !this._lastHasContent) {
@@ -1376,6 +1404,7 @@ export default {
       
       // 清空之前的结果
       this.answer = ''
+      this.evidenceMappings = []
       this.visualizations = []
       this.structuredData = {
         financialReview: null,
@@ -1408,6 +1437,8 @@ export default {
         })
         
         if (result.status === 'success') {
+          this.evidenceMappings = Array.isArray(result.evidence_mapping) ? result.evidence_mapping : []
+
           // 设置文本回答 - 确保有内容
           if (result.answer && result.answer.trim()) {
             this.answer = result.answer
@@ -2813,6 +2844,93 @@ export default {
 
 .answer-content :deep(li) {
   margin-bottom: 6px;
+}
+
+/* 证据映射卡片 */
+.evidence-card {
+  background: white;
+  border-radius: 16px;
+  padding: 24px 32px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.evidence-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid #f3f4f6;
+}
+
+.evidence-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.evidence-icon {
+  font-size: 22px;
+}
+
+.evidence-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.evidence-count {
+  min-width: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.evidence-list {
+  display: grid;
+  gap: 16px;
+}
+
+.evidence-item {
+  padding: 18px 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #fafafa;
+}
+
+.evidence-item-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
+
+.evidence-item-claim {
+  font-size: 15px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 12px;
+}
+
+.evidence-item-text {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #374151;
+}
+
+.evidence-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 /* 可视化区域 */

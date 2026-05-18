@@ -258,6 +258,47 @@ async def generate_section(request: GenerateSectionRequest):
         
         # 清理 Decimal 类型
         cleaned_result = _clean_decimal_types(result)
+
+        debug_sources = cleaned_result.get("sources", []) if isinstance(cleaned_result, dict) else []
+        debug_citation = cleaned_result.get("source_citation", "") if isinstance(cleaned_result, dict) else ""
+        logger.info(
+            "[generate-section] 最终返回 section=%s, sources_count=%d, source_citation=%s",
+            request.section_name,
+            len(debug_sources) if isinstance(debug_sources, list) else 0,
+            debug_citation or "<empty>",
+        )
+        print(
+            f"[generate-section debug] section={request.section_name}, "
+            f"sources_count={len(debug_sources) if isinstance(debug_sources, list) else 0}, "
+            f"source_citation={debug_citation or '<empty>'}"
+        )
+        if isinstance(debug_sources, list) and debug_sources:
+            for idx, source in enumerate(debug_sources[:5], 1):
+                metadata = source.get("metadata", {}) if isinstance(source, dict) else {}
+                page = metadata.get("page_number") or metadata.get("page") or metadata.get("page_label")
+                source_file = (
+                    metadata.get("source_file")
+                    or metadata.get("filename")
+                    or metadata.get("file_name")
+                    or metadata.get("source")
+                )
+                preview = ""
+                if isinstance(source, dict):
+                    preview = str(source.get("text", "") or "")[:120]
+                logger.info(
+                    "[generate-section] source[%d]: page=%s, file=%s, text=%s",
+                    idx,
+                    page,
+                    source_file,
+                    preview,
+                )
+                print(
+                    f"[generate-section debug] source[{idx}] page={page}, "
+                    f"file={source_file}, text={preview}"
+                )
+        else:
+            logger.warning("[generate-section] 最终返回中 sources 为空")
+            print("[generate-section debug] no sources returned in final payload")
         return JSONResponse(content=cleaned_result)
         
     except HTTPException:
@@ -279,6 +320,7 @@ async def agent_query(request: AgentQueryRequest):
         "status": "success" | "error",
         "question": str,
         "answer": str,
+        "evidence_mapping": List[Dict],  # 关键结论-证据-页码映射
         "tool_calls": List[Dict],  # 工具调用结果列表
         "structured_response": Dict,  # 结构化响应（可选）
         "visualization": Dict  # 可视化数据（可选）
@@ -335,6 +377,7 @@ async def agent_query(request: AgentQueryRequest):
             "status": result.get("status", "success"),
             "question": result.get("question", request.question),
             "answer": result.get("answer", ""),
+            "evidence_mapping": result.get("evidence_mapping", []),
             "tool_calls": result.get("tool_calls", []),  # 确保是列表
             "structured_response": result.get("structured_response"),
             "visualization": result.get("visualization")

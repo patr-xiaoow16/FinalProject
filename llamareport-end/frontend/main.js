@@ -348,6 +348,24 @@ const App = {
       return `来源：${fileLabel}，第${limited.join('、')}页${suffix}`
     }
 
+    const buildDupontFallbackSources = (result = {}) => {
+      const metrics = Array.isArray(result?.metrics?.metrics)
+        ? result.metrics.metrics
+        : Array.isArray(result?.metrics)
+          ? result.metrics
+          : []
+      const items = metrics
+        .filter(item => item && (item.metric || item.source))
+        .slice(0, 6)
+        .map((item) => ({
+          text: `${item.metric || '指标'}：${item.source || '年报相关章节'}（页码待补充）`,
+          metadata: {
+            source_file: result?.company_name ? `${result.company_name}${result.year ? `${result.year}年` : ''}年报` : '年报相关章节'
+          }
+        }))
+      return items
+    }
+
     const addVisualizationCards = (visualization, question, singleOnly = false) => {
       if (!visualization || !visualization.has_visualization) return 0
       let added = 0
@@ -2820,19 +2838,28 @@ const App = {
           }
           
           const answerHeader = `<div class="summary-title">以下是${typeName || sectionName}：</div>`
+          const sectionSources = Array.isArray(result.sources) ? result.sources : []
+          const sectionEvidenceMapping = Array.isArray(result.evidence_mapping) ? result.evidence_mapping : []
+          const sectionSourceCitation = result.source_citation || buildCompactCitation(sectionSources)
           if (answerText) {
             chatMessages.value.push({
               type: 'assistant',
               content: `${answerHeader}\n\n${answerText}`,
               timestamp: new Date(),
-              sectionName: sectionName
+              sectionName: sectionName,
+              sources: sectionSources,
+              sourceCitation: sectionSourceCitation,
+              evidenceMapping: sectionEvidenceMapping
             })
           } else {
             chatMessages.value.push({
               type: 'assistant',
               content: answerHeader,
               timestamp: new Date(),
-              sectionName: sectionName
+              sectionName: sectionName,
+              sources: sectionSources,
+              sourceCitation: sectionSourceCitation,
+              evidenceMapping: sectionEvidenceMapping
             })
           }
         }
@@ -3061,10 +3088,17 @@ const App = {
           if (result.year_from_document === false && result.year) {
             content += `\n⚠️ 未从当前文档中识别到报告年份，已使用 ${result.year} 年；若与 PDF 年份不一致，请先选择对应报告文件再生成杜邦分析。\n`
           }
+          const dupontSources = Array.isArray(result.sources) && result.sources.length > 0
+            ? result.sources
+            : buildDupontFallbackSources(result)
+          const dupontSourceCitation = buildCompactCitation(dupontSources)
+            || '来源：年报相关章节，页码待补充'
           chatMessages.value.push({ 
             type: 'assistant', 
             content: content, 
-            timestamp: new Date() 
+            timestamp: new Date(),
+            sources: dupontSources,
+            sourceCitation: dupontSourceCitation
           })
           
           showMessage('success', '杜邦分析生成成功！结果已显示在右侧面板。')

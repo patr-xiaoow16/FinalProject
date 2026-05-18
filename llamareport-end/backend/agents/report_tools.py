@@ -21,6 +21,7 @@ from models.report_models import (
     FinancialStatementTables
 )
 from agents.visualization_agent import generate_visualization_for_query
+from agents.source_utils import merge_sources
 # 相关性、因子分析已改为 LLM 生成，见 _llm_correlation_analysis / _llm_factor_analysis（多元回归已移除）
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,26 @@ def _get_cached_strategy_report(company_name: str, year: str, report_type: str) 
     return content
 
 
-def _set_cached_strategy_report(company_name: str, year: str, report_type: str, content: str) -> None:
+def _get_cached_strategy_sources(company_name: str, year: str, report_type: str) -> List[Dict[str, Any]]:
+    key = _strategy_cache_key(company_name, year)
+    bucket = _STRATEGY_REPORT_CACHE.get(key) or {}
+    record = bucket.get(report_type)
+    if not isinstance(record, dict):
+        return []
+    ts = record.get("ts")
+    if not isinstance(ts, (int, float)) or (time.time() - ts) > _STRATEGY_CACHE_TTL_SECONDS:
+        return []
+    sources = record.get("sources")
+    return sources if isinstance(sources, list) else []
+
+
+def _set_cached_strategy_report(
+    company_name: str,
+    year: str,
+    report_type: str,
+    content: str,
+    sources: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     if not isinstance(content, str) or not content.strip():
         return
     key = _strategy_cache_key(company_name, year)
@@ -57,7 +77,8 @@ def _set_cached_strategy_report(company_name: str, year: str, report_type: str, 
         _STRATEGY_REPORT_CACHE[key] = {}
     _STRATEGY_REPORT_CACHE[key][report_type] = {
         "content": content.strip(),
-        "ts": time.time()
+        "ts": time.time(),
+        "sources": sources if isinstance(sources, list) else [],
     }
 
 
@@ -204,6 +225,73 @@ async def _retrieve_only(
     except Exception as exc:
         logger.warning("⚠️ [profit_forecast] 检索失败: %s", exc)
         return ""
+
+
+async def _retrieve_with_sources(
+    query_engine: Any,
+    question: str,
+    top_k: int = 8,
+    timeout_seconds: float = 12.0
+) -> Dict[str, Any]:
+    try:
+        hub = getattr(query_engine, "_hub", None)
+        rag = getattr(hub, "rag_engine", None) if hub is not None else None
+
+        hybrid = getattr(rag, "hybrid_retriever", None) if rag is not None else None
+        if (
+            rag is not None
+            and getattr(rag, "use_hybrid_retriever", False)
+            and hybrid is not None
+            and getattr(hybrid, "text_index", None) is not None
+            and getattr(hybrid, "table_index", None) is not None
+        ):
+            results = await asyncio.wait_for(
+                asyncio.to_thread(hybrid.retrieve, question, top_k, "auto", None),
+                timeout=timeout_seconds,
+            )
+            snippets: List[str] = []
+            sources: List[Dict[str, Any]] = []
+            for item in (results or [])[:top_k]:
+                doc = item.get("document") if isinstance(item, dict) else None
+                if not doc:
+                    continue
+                text = str(getattr(doc, "text", "") or "").strip()
+                if text:
+                    snippets.append(text[:900])
+                sources.append({
+                    "text": text[:200] + "..." if len(text) > 200 else text,
+                    "metadata": getattr(doc, "metadata", {}) or {},
+                    "score": getattr(doc, "score", 0.0),
+                })
+            return {"text": "\n\n".join(snippets), "sources": sources}
+
+        if rag is not None and getattr(rag, "index", None) is not None:
+            retriever = rag.index.as_retriever(similarity_top_k=top_k)
+            nodes = await asyncio.wait_for(
+                asyncio.to_thread(retriever.retrieve, question),
+                timeout=timeout_seconds,
+            )
+            snippets: List[str] = []
+            sources: List[Dict[str, Any]] = []
+            for node in (nodes or [])[:top_k]:
+                text = str(getattr(node, "text", "") or "").strip()
+                if text:
+                    snippets.append(text[:900])
+                sources.append({
+                    "text": text[:200] + "..." if len(text) > 200 else text,
+                    "metadata": getattr(node, "metadata", {}) or {},
+                    "score": getattr(node, "score", 0.0),
+                })
+            return {"text": "\n\n".join(snippets), "sources": sources}
+
+        logger.warning("⚠️ [profit_forecast] 无可用纯检索器(含sources): %s", question[:80])
+        return {"text": "", "sources": []}
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ [profit_forecast] 检索超时(含sources): %s", question[:80])
+        return {"text": "", "sources": []}
+    except Exception as exc:
+        logger.warning("⚠️ [profit_forecast] 检索失败(含sources): %s", exc)
+        return {"text": "", "sources": []}
 
 
 async def _generate_card_insight(llm: Any, context: str, card_type: str) -> str:
@@ -2159,6 +2247,11 @@ async def generate_profit_forecast_and_valuation(
                 report_type="earnings_forecast_report"
             )
             if cached_report:
+                cached_sources = _get_cached_strategy_sources(
+                    company_name=company_name,
+                    year=year,
+                    report_type="earnings_forecast_report",
+                )
                 cached_report = _sanitize_earnings_forecast_report(cached_report)
                 logger.info("✅ [strategy_cache] 命中盈利预测缓存: %s %s", company_name, year)
                 return {
@@ -2174,6 +2267,7 @@ async def generate_profit_forecast_and_valuation(
                     "clustering_model": None,
                     "notes": "盈利预测模式执行完成（缓存命中）",
                     "earnings_forecast_report": cached_report.strip(),
+                    "sources": cached_sources,
                     "model_type": "earnings_forecast",
                     "company_name": company_name,
                     "year": year,
@@ -2218,16 +2312,29 @@ async def generate_profit_forecast_and_valuation(
             )
 
             start_retrieval = time.time()
-            table_ctx, report_ctx, correlation_ctx, quarterly_ctx, guidance_ctx = await asyncio.gather(
-                _retrieve_only(query_engine, table_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, report_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, correlation_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, quarterly_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, guidance_query, top_k=top_k, timeout_seconds=timeout_seconds),
+            table_bundle, report_bundle, correlation_bundle, quarterly_bundle, guidance_bundle = await asyncio.gather(
+                _retrieve_with_sources(query_engine, table_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, report_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, correlation_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, quarterly_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, guidance_query, top_k=top_k, timeout_seconds=timeout_seconds),
             )
+            table_ctx = table_bundle.get("text", "")
+            report_ctx = report_bundle.get("text", "")
+            correlation_ctx = correlation_bundle.get("text", "")
+            quarterly_ctx = quarterly_bundle.get("text", "")
+            guidance_ctx = guidance_bundle.get("text", "")
             retrieval_time = time.time() - start_retrieval
             retrieval_success_count = sum(
                 1 for c in [table_ctx, report_ctx, correlation_ctx, quarterly_ctx, guidance_ctx] if str(c).strip()
+            )
+            merged_retrieval_sources = merge_sources(
+                table_bundle.get("sources"),
+                report_bundle.get("sources"),
+                correlation_bundle.get("sources"),
+                quarterly_bundle.get("sources"),
+                guidance_bundle.get("sources"),
+                max_items=12,
             )
 
             llm = Settings.llm
@@ -2409,7 +2516,8 @@ Step10: 预测EPS = Step9 / 总股本
                     company_name=company_name,
                     year=year,
                     report_type="earnings_forecast_report",
-                    content=earnings_report
+                    content=earnings_report,
+                    sources=merged_retrieval_sources,
                 )
 
             total_time = time.time() - start_total
@@ -2426,6 +2534,7 @@ Step10: 预测EPS = Step9 / 总股本
                 "clustering_model": None,
                 "notes": "盈利预测模式执行完成（并行检索+单次生成）",
                 "earnings_forecast_report": earnings_report.strip(),
+                "sources": merged_retrieval_sources,
                 "model_type": "earnings_forecast",
                 "company_name": company_name,
                 "year": year,
@@ -2448,6 +2557,11 @@ Step10: 预测EPS = Step9 / 总股本
                 report_type="valuation_anchor_report"
             )
             if cached_report:
+                cached_sources = _get_cached_strategy_sources(
+                    company_name=company_name,
+                    year=year,
+                    report_type="valuation_anchor_report",
+                )
                 cached_report = _sanitize_valuation_anchor_report(cached_report)
                 logger.info("✅ [strategy_cache] 命中估值锚点缓存: %s %s", company_name, year)
                 return {
@@ -2463,6 +2577,7 @@ Step10: 预测EPS = Step9 / 总股本
                     "clustering_model": None,
                     "notes": "估值锚点分析模式执行完成（缓存命中）",
                     "valuation_anchor_report": cached_report.strip(),
+                    "sources": cached_sources,
                     "model_type": "valuation_anchor",
                     "company_name": company_name,
                     "year": year,
@@ -2497,13 +2612,22 @@ Step10: 预测EPS = Step9 / 总股本
                 "归属股东权益 PB PE 估值 分红率 管理层讨论与分析"
             )
             start_retrieval = time.time()
-            table_ctx, report_ctx, valuation_ctx = await asyncio.gather(
-                _retrieve_only(query_engine, table_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, report_query, top_k=top_k, timeout_seconds=timeout_seconds),
-                _retrieve_only(query_engine, valuation_query, top_k=top_k, timeout_seconds=timeout_seconds),
+            table_bundle, report_bundle, valuation_bundle = await asyncio.gather(
+                _retrieve_with_sources(query_engine, table_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, report_query, top_k=top_k, timeout_seconds=timeout_seconds),
+                _retrieve_with_sources(query_engine, valuation_query, top_k=top_k, timeout_seconds=timeout_seconds),
             )
+            table_ctx = table_bundle.get("text", "")
+            report_ctx = report_bundle.get("text", "")
+            valuation_ctx = valuation_bundle.get("text", "")
             retrieval_time = time.time() - start_retrieval
             retrieval_success_count = sum(1 for c in [table_ctx, report_ctx, valuation_ctx] if str(c).strip())
+            merged_retrieval_sources = merge_sources(
+                table_bundle.get("sources"),
+                report_bundle.get("sources"),
+                valuation_bundle.get("sources"),
+                max_items=12,
+            )
 
             earnings_report = _get_cached_strategy_report(
                 company_name=company_name,
@@ -2648,7 +2772,8 @@ Step10: 预测EPS = Step9 / 总股本
                     company_name=company_name,
                     year=year,
                     report_type="valuation_anchor_report",
-                    content=valuation_report
+                    content=valuation_report,
+                    sources=merged_retrieval_sources,
                 )
             total_time = time.time() - start_total
             return {
@@ -2664,6 +2789,7 @@ Step10: 预测EPS = Step9 / 总股本
                 "clustering_model": None,
                 "notes": "估值锚点分析模式执行完成（并行检索+单次生成）",
                 "valuation_anchor_report": valuation_report.strip(),
+                "sources": merged_retrieval_sources,
                 "model_type": "valuation_anchor",
                 "company_name": company_name,
                 "year": year,
@@ -2696,9 +2822,20 @@ Step10: 预测EPS = Step9 / 总股本
             f"{company_name} 年报 近三年 历年 净息差 ROE ROA 不良率 拨备覆盖率 "
             "成本收入比 信贷成本 资本充足率 主要指标 表 财务数据"
         )
-        table_data = query_engine.query(table_query)
-        report_data = query_engine.query(report_query)
-        correlation_data = query_engine.query(correlation_query)
+        table_bundle, report_bundle, correlation_bundle = await asyncio.gather(
+            _retrieve_with_sources(query_engine, table_query, top_k=8, timeout_seconds=12.0),
+            _retrieve_with_sources(query_engine, report_query, top_k=8, timeout_seconds=12.0),
+            _retrieve_with_sources(query_engine, correlation_query, top_k=8, timeout_seconds=12.0),
+        )
+        table_data = table_bundle.get("text", "")
+        report_data = report_bundle.get("text", "")
+        correlation_data = correlation_bundle.get("text", "")
+        base_sources = merge_sources(
+            table_bundle.get("sources"),
+            report_bundle.get("sources"),
+            correlation_bundle.get("sources"),
+            max_items=12,
+        )
         forecast_data = f"【表格】\n{str(table_data)}\n\n【年报文本】\n{str(report_data)}\n\n【相关性分析用-近三年核心指标】\n{str(correlation_data)}"
         
         # 使用 LLM 生成结构化的投资策略
@@ -2707,6 +2844,8 @@ Step10: 预测EPS = Step9 / 总股本
         # 综合投资策略分析：基于盈利预测 + 估值锚点结论，输出SWOT/打分/上下行/策略/跟踪指标
         if normalized_model == "comprehensive_strategy":
             # 先尝试复用缓存，缺失时再补算，避免重复点击时重复执行耗时步骤
+            earnings_output: Dict[str, Any] = {}
+            valuation_output: Dict[str, Any] = {}
             earnings_report = _get_cached_strategy_report(
                 company_name=company_name,
                 year=year,
@@ -2738,7 +2877,8 @@ Step10: 预测EPS = Step9 / 总股本
                         company_name=company_name,
                         year=year,
                         report_type="earnings_forecast_report",
-                        content=earnings_report
+                        content=earnings_report,
+                        sources=earnings_output.get("sources") if isinstance(earnings_output, dict) else [],
                     )
 
             if valuation_report:
@@ -2759,7 +2899,8 @@ Step10: 预测EPS = Step9 / 总股本
                         company_name=company_name,
                         year=year,
                         report_type="valuation_anchor_report",
-                        content=valuation_report
+                        content=valuation_report,
+                        sources=valuation_output.get("sources") if isinstance(valuation_output, dict) else [],
                     )
 
             comprehensive_prompt = f"""
@@ -2899,6 +3040,12 @@ Prompt 2（估值分析）输出：
                 "earnings_forecast_report": earnings_report.strip(),
                 "valuation_anchor_report": valuation_report.strip(),
                 "comprehensive_strategy_report": comprehensive_report.strip(),
+                "sources": merge_sources(
+                    base_sources,
+                    earnings_output.get("sources") if isinstance(earnings_output, dict) else [],
+                    valuation_output.get("sources") if isinstance(valuation_output, dict) else [],
+                    max_items=12,
+                ),
                 "model_type": "comprehensive_strategy",
                 "company_name": company_name,
                 "year": year
@@ -3201,6 +3348,7 @@ Prompt 2（估值分析）输出：
                 result_dict = {"content": str(result_dict)}
             result_dict["company_name"] = company_name
             result_dict["year"] = year
+            result_dict["sources"] = base_sources
 
         # 若首轮指标抽取失败（返回了 error），直接返回错误，不执行后续分析
         if isinstance(result_dict, dict) and result_dict.get("error"):
@@ -3703,5 +3851,6 @@ Prompt 2（估值分析）输出：
         return {
             "error": f"生成投资策略（相关性分析）失败: {str(e)}",
             "company_name": company_name,
-            "year": year
+            "year": year,
+            "sources": [],
         }

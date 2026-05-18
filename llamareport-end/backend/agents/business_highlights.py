@@ -277,6 +277,28 @@ async def _run_query_with_timeout(query_engine: Any, query: str, timeout: int) -
     )
 
 
+async def _run_query_with_sources(query_engine: Any, query: str, timeout: int) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    try:
+        response = await asyncio.wait_for(
+            loop.run_in_executor(None, query_engine.query, query),
+            timeout=timeout
+        )
+        text = str(response.response) if hasattr(response, "response") else str(response)
+        sources = []
+        if hasattr(response, "source_nodes"):
+            for node in list(response.source_nodes)[:8]:
+                node_text = str(getattr(node, "text", "") or "").strip()
+                sources.append({
+                    "text": node_text[:200] + "..." if len(node_text) > 200 else node_text,
+                    "metadata": getattr(node, "metadata", {}) or {},
+                    "score": getattr(node, "score", 0.0),
+                })
+        return {"text": text, "sources": sources}
+    except Exception:
+        return {"text": "", "sources": []}
+
+
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     json_match = re.search(r'\{[\s\S]*\}', text)
     if not json_match:
@@ -1109,11 +1131,14 @@ async def generate_business_highlights(
         strategy_query = f"{company_name} {year}年 发展战略 经营计划 战略规划 竞争优势"
         retrieval_count += 3
         q_start = time.time()
-        overview_data, business_data, strategy_data = await asyncio.gather(
-            _run_with_timeout(_run_query_with_timeout(query_engine, overview_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "公司概况检索"),
-            _run_with_timeout(_run_query_with_timeout(query_engine, business_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "业务结构检索"),
-            _run_with_timeout(_run_query_with_timeout(query_engine, strategy_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, "", "战略检索"),
+        overview_bundle, business_bundle, strategy_bundle = await asyncio.gather(
+            _run_with_timeout(_run_query_with_sources(query_engine, overview_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, {"text": "", "sources": []}, "公司概况检索"),
+            _run_with_timeout(_run_query_with_sources(query_engine, business_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, {"text": "", "sources": []}, "业务结构检索"),
+            _run_with_timeout(_run_query_with_sources(query_engine, strategy_query, QUERY_TIMEOUT_SECONDS), QUERY_TIMEOUT_SECONDS + 1, {"text": "", "sources": []}, "战略检索"),
         )
+        overview_data = overview_bundle.get("text", "")
+        business_data = business_bundle.get("text", "")
+        strategy_data = strategy_bundle.get("text", "")
         retrieval_time += time.time() - q_start
         if str(overview_data).strip():
             retrieval_success_count += 1
@@ -1121,6 +1146,20 @@ async def generate_business_highlights(
             retrieval_success_count += 1
         if str(strategy_data).strip():
             retrieval_success_count += 1
+        merged_sources: List[Dict[str, Any]] = []
+        seen_source_keys = set()
+        for bundle in [overview_bundle, business_bundle, strategy_bundle]:
+            for source in bundle.get("sources", []) or []:
+                metadata = source.get("metadata", {}) or {}
+                dedupe_key = (
+                    source.get("text", ""),
+                    metadata.get("page_number"),
+                    metadata.get("source_file") or metadata.get("filename") or metadata.get("source"),
+                )
+                if dedupe_key in seen_source_keys:
+                    continue
+                seen_source_keys.add(dedupe_key)
+                merged_sources.append(source)
 
         # Step 2: 行业识别（规则优先，LLM兜底收紧）
         inferred_industry = _infer_industry_from_company_name(company_name)
@@ -1328,6 +1367,7 @@ async def generate_business_highlights(
                 "max_total_seconds": MAX_TOTAL_SECONDS,
             }
         }
+        result_dict["sources"] = merged_sources[:12]
 
         return result_dict
 
@@ -1339,6 +1379,7 @@ async def generate_business_highlights(
             "error": f"生成业务亮点失败: {str(e)}",
             "company_name": company_name,
             "year": year,
+            "sources": [],
             "segment_tables": [],
             "key_metrics_summary": _build_key_metrics_summary([], year)
         }

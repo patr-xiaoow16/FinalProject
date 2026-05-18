@@ -122,6 +122,68 @@ async def _retrieve_only(query_engine: Any, question: str, top_k: int, timeout_s
         return ""
 
 
+async def _retrieve_with_sources(query_engine: Any, question: str, top_k: int, timeout_seconds: float) -> Dict[str, Any]:
+    try:
+        hub = getattr(query_engine, "_hub", None)
+        rag = getattr(hub, "rag_engine", None) if hub is not None else None
+
+        hybrid = getattr(rag, "hybrid_retriever", None) if rag is not None else None
+        if (
+            rag is not None
+            and getattr(rag, "use_hybrid_retriever", False)
+            and hybrid is not None
+            and getattr(hybrid, "text_index", None) is not None
+            and getattr(hybrid, "table_index", None) is not None
+        ):
+            results = await asyncio.wait_for(
+                asyncio.to_thread(hybrid.retrieve, question, top_k, "auto", None),
+                timeout=timeout_seconds,
+            )
+            snippets: List[str] = []
+            sources: List[Dict[str, Any]] = []
+            for item in (results or [])[:top_k]:
+                doc = item.get("document") if isinstance(item, dict) else None
+                if not doc:
+                    continue
+                text = _to_text(getattr(doc, "text", ""))
+                if text:
+                    snippets.append(text[:800])
+                sources.append({
+                    "text": text[:200] + "..." if len(text) > 200 else text,
+                    "metadata": getattr(doc, "metadata", {}) or {},
+                    "score": getattr(doc, "score", 0.0),
+                })
+            return {"text": "\n\n".join(snippets), "sources": sources}
+
+        if rag is not None and getattr(rag, "index", None) is not None:
+            retriever = rag.index.as_retriever(similarity_top_k=top_k)
+            nodes = await asyncio.wait_for(
+                asyncio.to_thread(retriever.retrieve, question),
+                timeout=timeout_seconds,
+            )
+            snippets: List[str] = []
+            sources: List[Dict[str, Any]] = []
+            for node in (nodes or [])[:top_k]:
+                text = _to_text(getattr(node, "text", ""))
+                if text:
+                    snippets.append(text[:800])
+                sources.append({
+                    "text": text[:200] + "..." if len(text) > 200 else text,
+                    "metadata": getattr(node, "metadata", {}) or {},
+                    "score": getattr(node, "score", 0.0),
+                })
+            return {"text": "\n\n".join(snippets), "sources": sources}
+
+        logger.warning("⚠️ [business_guidance] 无可用纯检索器(含sources)，返回空材料")
+        return {"text": "", "sources": []}
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ [business_guidance] 检索超时(含sources): %s", question[:80])
+        return {"text": "", "sources": []}
+    except Exception as exc:
+        logger.warning("⚠️ [business_guidance] 检索失败(含sources): %s", exc)
+        return {"text": "", "sources": []}
+
+
 async def generate_business_guidance(
     company_name: Annotated[str, "公司名称"],
     year: Annotated[str, "年份"],
@@ -145,14 +207,32 @@ async def generate_business_guidance(
         q4 = f"{company_name} {year}年 风险提示 不确定性 资产质量 拨备 资本 流动性"
 
         start_retrieval = time.time()
-        ctx_goal, ctx_metric, ctx_path, ctx_risk = await asyncio.gather(
-            _retrieve_only(query_engine, q1, top_k, timeout_seconds),
-            _retrieve_only(query_engine, q2, top_k, timeout_seconds),
-            _retrieve_only(query_engine, q3, top_k, timeout_seconds),
-            _retrieve_only(query_engine, q4, top_k, timeout_seconds),
+        goal_bundle, metric_bundle, path_bundle, risk_bundle = await asyncio.gather(
+            _retrieve_with_sources(query_engine, q1, top_k, timeout_seconds),
+            _retrieve_with_sources(query_engine, q2, top_k, timeout_seconds),
+            _retrieve_with_sources(query_engine, q3, top_k, timeout_seconds),
+            _retrieve_with_sources(query_engine, q4, top_k, timeout_seconds),
         )
+        ctx_goal = goal_bundle.get("text", "")
+        ctx_metric = metric_bundle.get("text", "")
+        ctx_path = path_bundle.get("text", "")
+        ctx_risk = risk_bundle.get("text", "")
         retrieval_time = time.time() - start_retrieval
         retrieval_success_count = sum(1 for c in [ctx_goal, ctx_metric, ctx_path, ctx_risk] if str(c).strip())
+        merged_sources: List[Dict[str, Any]] = []
+        seen_source_keys = set()
+        for bundle in [goal_bundle, metric_bundle, path_bundle, risk_bundle]:
+            for source in bundle.get("sources", []) or []:
+                metadata = source.get("metadata", {}) or {}
+                dedupe_key = (
+                    source.get("text", ""),
+                    metadata.get("page_number"),
+                    metadata.get("source_file") or metadata.get("filename") or metadata.get("source"),
+                )
+                if dedupe_key in seen_source_keys:
+                    continue
+                seen_source_keys.add(dedupe_key)
+                merged_sources.append(source)
 
         llm = Settings.llm
 
@@ -381,6 +461,7 @@ async def generate_business_guidance(
 
         result_dict["company_name"] = company_name
         result_dict["year"] = year
+        result_dict["sources"] = merged_sources[:12]
 
         total_time = time.time() - start_total
         result_dict["perf_stats"] = {
@@ -419,6 +500,7 @@ async def generate_business_guidance(
             "risk_warnings": ["数据不足，无法生成洞察"],
             "company_name": company_name,
             "year": year,
+            "sources": [],
             "perf_stats": {
                 "retrieval_time_seconds": 0,
                 "llm_time_seconds": 0,

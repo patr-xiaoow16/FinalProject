@@ -64,7 +64,12 @@ def _validate_and_clean_data(data: Dict[str, Any], model_class) -> Dict[str, Any
     try:
         # 尝试用模型验证数据
         validated = model_class(**data)
-        return validated.model_dump()
+        validated_data = validated.model_dump()
+        if isinstance(validated_data, dict):
+            for key, value in data.items():
+                if key not in validated_data:
+                    validated_data[key] = value
+        return validated_data
     except Exception as e:
         logger.warning(f"数据验证失败，尝试清理: {str(e)}")
         # 如果验证失败，尝试清理常见问题
@@ -755,6 +760,122 @@ def retrieve_financial_evidence_bundle(
         elapsed = time.time() - start_time
         logger.error(f"❌ [retrieve_financial_evidence_bundle] 失败（耗时: {elapsed:.2f}秒）: {str(e)}")
         return f"检索失败: {str(e)}"
+
+
+def _serialize_source_node(node: Any, max_text_length: int = 200) -> Dict[str, Any]:
+    text = str(getattr(node, "text", "") or "").strip()
+    if len(text) > max_text_length:
+        text = text[:max_text_length].rstrip() + "..."
+    return {
+        "text": text,
+        "metadata": getattr(node, "metadata", {}) or {},
+        "score": getattr(node, "score", 0.0),
+    }
+
+
+def extract_sources_from_response(response: Any, max_items: int = 8) -> List[Dict[str, Any]]:
+    sources: List[Dict[str, Any]] = []
+    try:
+        if hasattr(response, "source_nodes"):
+            for node in list(response.source_nodes)[:max_items]:
+                sources.append(_serialize_source_node(node))
+    except Exception as exc:
+        logger.warning(f"提取 response sources 失败: {exc}")
+    return sources
+
+
+def retrieve_financial_evidence_bundle_with_sources(
+    company_name: str,
+    year: str,
+    query_engine: Any,
+    top_k: int = 15,
+) -> Dict[str, Any]:
+    start_time = time.time()
+    combined_query = (
+        f"{company_name} {year}年 财务点评 资产负债表 利润表 现金流量表 "
+        "资产总额 发放贷款及垫款 个人贷款 企业贷款 投资类金融资产 现金及存放央行款项 存放同业款项 "
+        "负债总额 吸收存款 个人存款 企业存款 向央行借款 同业负债 已发行债务证券 卖出回购金融资产 "
+        "营业收入合计 利息净收入 非利息净收入 手续费及佣金净收入 其他非利息净收入 投资收益 公允价值变动损益 "
+        "营业支出合计 业务及管理费 信用及其他资产减值损失 税金及附加 "
+        "经营活动现金流 投资活动现金流 筹资活动现金流 现金净变动额"
+    )
+    cache_key = _build_financial_cache_key({
+        "kind": "financial_evidence_bundle",
+        "company": company_name,
+        "year": year,
+        "top_k": top_k,
+        "query": combined_query,
+    })
+    cached = _get_financial_cached_data(cache_key)
+    if isinstance(cached, dict) and "text" in cached:
+        return cached
+    if isinstance(cached, str):
+        return {"text": cached, "sources": []}
+
+    try:
+        hub = getattr(query_engine, "_hub", None)
+        rag_engine = getattr(hub, "rag_engine", None) if hub else None
+        if rag_engine is not None:
+            results = []
+            context_filter = {"company": company_name, "year": year}
+            if (
+                getattr(rag_engine, "use_hybrid_retriever", False)
+                and getattr(rag_engine, "hybrid_retriever", None)
+                and rag_engine.hybrid_retriever.text_index
+                and rag_engine.hybrid_retriever.table_index
+            ):
+                results = rag_engine.hybrid_retriever.retrieve(
+                    combined_query,
+                    top_k=top_k,
+                    strategy="table_first",
+                    context_filter=context_filter,
+                )
+            elif getattr(rag_engine, "index", None):
+                retriever = rag_engine.index.as_retriever(similarity_top_k=top_k)
+                nodes = retriever.retrieve(combined_query)
+                results = [{"document": node, "semantic_score": getattr(node, "score", 0.0)} for node in nodes]
+
+            if results:
+                parts = []
+                sources = []
+                for item in results[:top_k]:
+                    doc = item.get("document")
+                    if not doc:
+                        continue
+                    text = str(getattr(doc, "text", "") or "").strip()
+                    if not text:
+                        continue
+                    if len(text) > 1200:
+                        text = text[:1200] + "..."
+                    parts.append(text)
+                    sources.append(_serialize_source_node(doc))
+                if parts:
+                    final = {"text": "\n\n".join(parts), "sources": sources}
+                    _set_financial_cached_data(cache_key, final)
+                    return final
+
+        if hasattr(query_engine, "query"):
+            response = query_engine.query(combined_query, top_k=top_k)
+            if hasattr(response, "response"):
+                content = str(response.response)
+            elif hasattr(response, "message") and hasattr(response.message, "content"):
+                content = str(response.message.content)
+            elif hasattr(response, "content"):
+                content = str(response.content)
+            else:
+                content = str(response)
+            final = {
+                "text": content if content else "未检索到可用证据",
+                "sources": extract_sources_from_response(response, max_items=top_k),
+            }
+            _set_financial_cached_data(cache_key, final)
+            return final
+
+        return {"text": "未检索到可用证据", "sources": []}
+    except Exception as exc:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ [retrieve_financial_evidence_bundle_with_sources] 失败（耗时: {elapsed:.2f}秒）: {exc}")
+        return {"text": f"检索失败: {str(exc)}", "sources": []}
 
 
 def retrieve_business_data(
